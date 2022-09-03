@@ -1,0 +1,144 @@
+{
+	// Use IntelliSense to learn about possible attributes.
+	// Hover to view descriptions of existing attributes.
+	// For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug executable 'mpc-ecdsa'",
+			"cargo": {
+				"args": [
+					"build",
+					"--bin=mpc-ecdsa",
+					"--package=mpc-ecdsa"
+				],
+				"filter": {
+					"name": "mpc-ecdsa",
+					"kind": "bin"
+				}
+			},
+			"args": [
+				"setup", "-c ./peer_config0.json", "-r 127.0.0.1:8080", "-r 127.0.0.1:8080", "-m /ip4/127.0.0.1/tcp/4000", "-p '/Users/phcxc/workpalce/tss-libp2p/data/12D3KooWMQmcJA5raTtuxqAguM5CiXRhEDumLNmZQ7PmKZizjFBX/'"
+			],
+			"cwd": "${workspaceFolder}"
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug unit tests in executable 'mpc-ecdsa'",
+			"cargo": {
+				"args": [
+					"test",
+					"--no-run",
+					"--bin=mpc-ecdsa",
+					"--package=mpc-ecdsa"
+				],
+				"filter": {
+					"name": "mpc-ecdsa",
+					"kind": "bin"
+				}
+			},
+			"args": [
+				"setup", "-c ./peer_config0.json", "-r 127.0.0.1:8080", "-r 127.0.0.1:8080", "-m /ip4/127.0.0.1/tcp/4000", "-p ./data/12D3KooWMQmcJA5raTtuxqAguM5CiXRhEDumLNmZQ7PmKZizjFBX/"
+			],
+			"cwd": "${workspaceFolder}"
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug unit tests in library 'mpc-api'",
+			"cargo": {
+				"args": [
+					"test",
+					"--no-run",
+					"--lib",
+					"--package=mpc-api"
+				],
+				"filter": {
+					"name": "mpc-api",
+					"kind": "lib"
+				}
+			},
+			"args": [],
+			"cwd": "${workspaceFolder}"
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug unit tests in library 'mpc-p2p'",
+			"cargo": {
+				"args": [
+					"test",
+					"--no-run",
+					"--lib",
+					"--package=mpc-p2p"
+				],
+				"filter": {
+					"name": "mpc-p2p",
+					"kind": "lib"
+				}
+			},
+			"args": [],
+			"cwd": "${workspaceFolder}"
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug unit tests in library 'mpc-rpc'",
+			"cargo": {
+				"args": [
+					"test",
+					"--no-run",
+					"--lib",
+					"--package=mpc-rpc"
+				],
+				"filter": {
+					"name": "mpc-rpc",
+					"kind": "lib"
+				}
+			},
+			"args": [],
+			"cwd": "${workspaceFolder}"
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug unit tests in library 'mpc-runtime'",
+			"cargo": {
+				"args": [
+					"test",
+					"--no-run",
+					"--lib",
+					"--package=mpc-runtime"
+				],
+				"filter": {
+					"name": "mpc-runtime",
+					"kind": "lib"
+				}
+			},
+			"args": [],
+			"cwd": "${workspaceFolder}"
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug unit tests in library 'mpc-tss'",
+			"cargo": {
+				"args": [
+					"test",
+					"--no-run",
+					"--lib",
+					"--package=mpc-tss"
+				],
+				"filter": {
+					"name": "mpc-tss",
+					"kind": "lib"
+				}
+			},
+			"args": [],
+			"cwd": "${workspaceFolder}"
+		}
+	]
+}

@@ -1,0 +1,20 @@
+{
+	"cSpell.words": [
+		"Behaviour",
+		"Cbor",
+		"curv",
+		"dagcbor",
+		"ipld",
+		"Itertools",
+		"Keccak",
+		"keysign",
+		"libp",
+		"multiaddr",
+		"oneshot",
+		"Peerset",
+		"Serviceto",
+		"smallvec",
+		"thiserror",
+		"varint"
+	]
+}

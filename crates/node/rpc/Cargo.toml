@@ -1,0 +1,36 @@
+[package]
+name = "mpc-rpc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Internal workspace crates
+mpc-network = { workspace = true }
+mpc-rpc-api = { workspace = true }
+mpc-runtime = { workspace = true }
+mpc-tss = { workspace = true }
+
+# Async runtime
+futures = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true }
+async-std = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Networking
+libp2p = { workspace = true }
+unsigned-varint = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }

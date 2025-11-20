@@ -1,5 +1,5 @@
 use crate::{
-    behaviour::{Behaviour, BehaviourOut},
+    behaviour::{Behaviour, BehaviourEvent},
     error::Error,
     request_responses,
     request_responses::IfDisconnected,
@@ -13,7 +13,7 @@ use futures::select;
 use futures_util::stream::StreamExt;
 use libp2p::core::transport::upgrade;
 use libp2p::noise::NoiseConfig;
-use libp2p::swarm::SwarmEvent;
+use libp2p::swarm::{SwarmBuilder, SwarmEvent};
 use libp2p::tcp::TcpConfig;
 use libp2p::{mplex, noise, PeerId, Swarm, Transport};
 use std::{borrow::Cow, sync::Arc};
@@ -119,7 +119,7 @@ impl NetworkWorker {
                     }
                 }
             };
-            Swarm::new(transport, behaviour, local_peer_id)
+            SwarmBuilder::with_async_std_executor(transport, behaviour, local_peer_id).build()
         };
 
         // Listen on the addresses.
@@ -165,8 +165,22 @@ impl NetworkWorker {
                 swarm_event = swarm_stream.next() => match swarm_event {
                     // Outbound events
                     Some(event) => match event {
-                        SwarmEvent::Behaviour(BehaviourOut::InboundRequest{peer, protocol, result}) => {
-                            info!("Inbound message from {:?} related to {:?} protocol result {:?}", peer, protocol, result);
+                        SwarmEvent::Behaviour(behaviour_event) => match behaviour_event {
+                            BehaviourEvent::InboundRequest { peer, protocol, result } => {
+                                info!("Inbound message from {:?} related to {:?} protocol result {:?}", peer, protocol, result);
+                            }
+                            BehaviourEvent::RequestResponse(request_responses::Event::RequestFinished { peer, protocol, duration, result }) => {
+                                debug!(
+                                    "broadcast for protocol {:?} finished with {:?} peer: {:?} took: {:?}",
+                                    protocol.to_string(),
+                                    result,
+                                    peer,
+                                    duration
+                                );
+                            }
+                            BehaviourEvent::Identify(event) => Behaviour::on_identify_event(&event),
+                            BehaviourEvent::Ping(event) => Behaviour::on_ping_event(&event),
+                            BehaviourEvent::Discovery(_) | BehaviourEvent::RequestResponse(_) => {}
                         },
                         SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {:?}", address),
                         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
@@ -190,7 +204,7 @@ impl NetworkWorker {
                             } => {
                                 match message {
                                     MessageIntent::Broadcast(payload, response_sender) => {
-                                        let peers: Vec<_> = behaviour.peers(room_id).collect();
+                                        let peers: Vec<_> = swarm_stream.get_mut().connected_peers().cloned().collect();
                                         println!("NetworkService: Broadcasting to {} peers in room {:?}", peers.len(), room_id);
                                         for peer in &peers {
                                             println!("NetworkService: Sending to peer {}", peer);

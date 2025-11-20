@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use async_std::task;
 use clap::Parser;
-use mpc_network::{Curve, NetworkWorker, NodeKeyConfig, Params, RoomConfig, Secret};
+use mpc_network::{Curve, NetworkParamsBuilder, NetworkWorker, NodeKeyConfig, RoomConfig, Secret};
 use mpc_rpc::Tss;
 use mpc_rpc_api::server::JsonRPCServer;
 use mpc_runtime::{new_worker_and_service, LocalStorage};
@@ -51,13 +51,12 @@ impl Command {
             config.boot_nodes.len(),
         );
 
-        let params = Params {
-            listen_address: local_party.network_peer.multiaddr.clone(),
-            rooms: vec![room_cfg],
-            mdns: self.mdns,
-            kademlia: self.kademlia,
-            boot_nodes: boot_nodes.clone().into_iter().collect(),
-        };
+        let params = NetworkParamsBuilder::new(local_party.network_peer.multiaddr.clone())
+            .with_mdns(self.mdns)
+            .with_kademlia(self.kademlia)
+            .with_boot_nodes(boot_nodes.clone())
+            .with_room(room_cfg)
+            .build();
 
         let net_worker = NetworkWorker::new(node_key, params)?;
         let net_service = net_worker.service().clone();

@@ -31,7 +31,7 @@ impl EchoGadget {
 
     pub async fn wrap_execution(
         mut self,
-         computation_fut: impl Future<Output = crate::Result<()>> + Unpin,
+        computation_fut: impl Future<Output = crate::Result<()>> + Unpin,
     ) -> crate::Result<()> {
         let mut echo = Box::pin(self.proceed_round().fuse());
         let future = computation_fut.fuse();
@@ -68,8 +68,12 @@ impl EchoGadget {
         // Sort messages by sender to ensure consistent ordering
         let mut msgs_vec: Vec<_> = self.msgs.drain().collect();
         msgs_vec.sort_by_key(|m| m.sender);
-        
-        println!("Echo: Collected {} messages from senders: {:?}", msgs_vec.len(), msgs_vec.iter().map(|m| m.sender).collect::<Vec<_>>());
+
+        println!(
+            "Echo: Collected {} messages from senders: {:?}",
+            msgs_vec.len(),
+            msgs_vec.iter().map(|m| m.sender).collect::<Vec<_>>()
+        );
 
         let mut hasher = Blake2s256::new();
         let mut incoming_acks = vec![];

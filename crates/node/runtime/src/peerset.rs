@@ -7,7 +7,7 @@ use std::{
     io,
     io::{BufReader, BufWriter, Read, Write},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 #[derive(Clone)]
 pub struct Peerset {

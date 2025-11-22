@@ -129,7 +129,7 @@ impl Future for ProtocolExecution {
                 Some(remote_index) => {
                     let (res_tx, mut res_rx) = mpsc::channel(1);
 
-                    pending_futures.push(
+                    pending_futures.push_back(
                         network_service
                             .clone()
                             .send_message_owned(
@@ -159,7 +159,7 @@ impl Future for ProtocolExecution {
                 None => {
                     // Broadcast message during protocol execution should use Computation type
                     let (res_tx, res_rx) = mpsc::channel((n - 1) as usize);
-                    pending_futures.push(
+                    pending_futures.push_back(
                         network_service
                             .clone()
                             .multicast_message_owned(

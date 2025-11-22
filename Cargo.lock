@@ -302,27 +302,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-stream"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dad5c83079eae9969be7fadefe640a1c566901f05ff91ab221de4b6f68d9507e"
-dependencies = [
- "async-stream-impl",
- "futures-core",
-]
-
-[[package]]
-name = "async-stream-impl"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10f203db73a71dfa2fb6dd22763990fa26f3d2625a6da2da900d23b87d26be27"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.89",
-]
-
-[[package]]
 name = "async-task"
 version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3191,7 +3170,6 @@ dependencies = [
  "mpc-runtime",
  "rand 0.8.5",
  "rand_core 0.6.4",
- "round-based",
  "serde",
  "serde_ipld_dagcbor",
  "serde_json",
@@ -4291,20 +4269,6 @@ dependencies = [
  "untrusted",
  "web-sys",
  "winapi 0.3.9",
-]
-
-[[package]]
-name = "round-based"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "691944449a819eb32e9db18240a8c0e0d35da3849d2938a4290a21862a42bf07"
-dependencies = [
- "async-stream",
- "futures 0.3.31",
- "log 0.4.28",
- "serde",
- "thiserror 1.0.30",
- "tokio",
 ]
 
 [[package]]

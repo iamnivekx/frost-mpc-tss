@@ -1,5 +1,5 @@
 use crate::keygen::KeyShare;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use frost_core::{
     keys::{KeyPackage, PublicKeyPackage, SigningShare, VerifyingShare},
     Ciphersuite, Identifier, SigningPackage,
@@ -7,8 +7,10 @@ use frost_core::{
 use mpc_network::Curve;
 use mpc_runtime::{IncomingRequest, OutgoingResponse, Peerset};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+};
 
 #[derive(Serialize, Deserialize)]
 pub struct PublicKey {
@@ -172,7 +174,7 @@ impl KeySign {
         commitments_map.insert(identifier_id, commitments);
 
         // Create a set of expected participant identifiers for validation
-        let expected_participants: std::collections::BTreeSet<Identifier<C>> = signing_participants
+        let expected_participants: BTreeSet<Identifier<C>> = signing_participants
             .iter()
             .map(|&id| Identifier::try_from(id))
             .collect::<Result<_, _>>()
@@ -181,7 +183,7 @@ impl KeySign {
         // Create a reference set for comparison
         let expected_participants_refs: BTreeSet<_> = expected_participants.iter().collect();
 
-        let mut received_participants = std::collections::BTreeSet::new();
+        let mut received_participants = BTreeSet::new();
         received_participants.insert(identifier_id);
 
         while received_participants.len() < signing_participants.len() {
@@ -231,8 +233,7 @@ impl KeySign {
         }
 
         // Verify we have commitments from all expected participants
-        let commitments_identifiers: std::collections::BTreeSet<_> =
-            commitments_map.keys().collect();
+        let commitments_identifiers: BTreeSet<_> = commitments_map.keys().collect();
         if commitments_identifiers != expected_participants_refs {
             return Err(anyhow!(
                 "Missing commitments from some participants. Expected: {:?}, Got: {:?}",
@@ -276,10 +277,10 @@ impl KeySign {
         println!("Round 2: Signature share sent successfully");
 
         // Receive signature shares from all other participants
-        let mut signature_shares = std::collections::BTreeMap::new();
+        let mut signature_shares = BTreeMap::new();
         signature_shares.insert(identifier_id, signature_share);
 
-        let mut received_signature_participants = std::collections::BTreeSet::new();
+        let mut received_signature_participants = BTreeSet::new();
         received_signature_participants.insert(identifier_id);
 
         while received_signature_participants.len() < signing_participants.len() {
@@ -332,8 +333,7 @@ impl KeySign {
         }
 
         // Verify we have signature shares from all expected participants
-        let signature_shares_identifiers: std::collections::BTreeSet<_> =
-            signature_shares.keys().collect();
+        let signature_shares_identifiers: BTreeSet<_> = signature_shares.keys().collect();
         if signature_shares_identifiers != expected_participants_refs {
             return Err(anyhow!(
                 "Missing signature shares from some participants. Expected: {:?}, Got: {:?}",
@@ -370,7 +370,7 @@ impl KeySign {
         );
 
         // Verify all signature participants are in the public key package
-        let public_key_identifiers: std::collections::BTreeSet<_> =
+        let public_key_identifiers: BTreeSet<_> =
             public_key_package.verifying_shares().keys().collect();
         for sig_id in signature_shares.keys() {
             if !public_key_identifiers.contains(sig_id) {
@@ -414,10 +414,9 @@ impl KeySign {
     }
 
     fn read_key_share(&self) -> anyhow::Result<KeyShare> {
-        let share_bytes =
-            fs::read(self.path.as_str()).map_err(|e| anyhow!("error reading local key: {e}"))?;
-
-        serde_json::from_slice(&share_bytes)
-            .map_err(|e| anyhow!("error deserializing local key: {e}"))
+        let share_bytes = fs::read(&self.path).context("failed to read local key")?;
+        let key_share =
+            serde_json::from_slice(&share_bytes).context("failed to deserialize local key")?;
+        Ok(key_share)
     }
 }

@@ -1,7 +1,7 @@
 use crate::Params;
 use async_std::task;
-use libp2p::identity::PublicKey;
-use libp2p::kad::{
+use libp2p_identity::PublicKey;
+use libp2p_kad::{
     store::MemoryStore, Behaviour as KademliaBehaviour, Config as KademliaConfig,
     Event as KademliaEvent, QueryId,
 };

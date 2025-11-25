@@ -1188,11 +1188,11 @@ mod tests {
             transport::{MemoryTransport, Transport},
             upgrade,
         },
-        identity::Keypair,
         noise,
         swarm::{Swarm, SwarmEvent},
         Multiaddr,
     };
+    use libp2p_identity::Keypair;
 
     use std::{iter, time::Duration};
 

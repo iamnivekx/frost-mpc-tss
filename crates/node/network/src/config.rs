@@ -1,10 +1,8 @@
 use crate::{request_responses, RoomId};
 use anyhow::anyhow;
 use futures::channel::mpsc;
-use libp2p::{
-    identity::{ed25519, Keypair},
-    multiaddr, Multiaddr, PeerId,
-};
+use libp2p::{multiaddr, Multiaddr, PeerId};
+use libp2p_identity::{ed25519, Keypair};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,

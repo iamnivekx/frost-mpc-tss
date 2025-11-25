@@ -19,6 +19,8 @@ thiserror = { workspace = true }
 
 # Networking
 libp2p = { workspace = true }
+libp2p-identity = { workspace = true }
+libp2p-kad = { workspace = true }
 unsigned-varint = { workspace = true, features = [
     "futures",
     "asynchronous_codec",

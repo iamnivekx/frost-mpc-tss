@@ -1,7 +1,10 @@
 use crate::Params;
 use async_std::task;
 use libp2p::identity::PublicKey;
-use libp2p::kad::{store::MemoryStore, Behaviour as KademliaBehaviour, Config as KademliaConfig, Event as KademliaEvent, QueryId};
+use libp2p::kad::{
+    store::MemoryStore, Behaviour as KademliaBehaviour, Config as KademliaConfig,
+    Event as KademliaEvent, QueryId,
+};
 use libp2p::mdns::async_io::{Behaviour as MdnsBehaviour, Config as MdnsConfig};
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::NetworkBehaviour;
@@ -50,6 +53,7 @@ impl DiscoveryBehaviour {
             .rooms
             .iter()
             .flat_map(|ra| ra.boot_nodes.clone())
+            .chain(params.boot_nodes.clone().into_iter())
             .map(|mwp| (mwp.peer_id, mwp.multiaddr))
             .collect();
 

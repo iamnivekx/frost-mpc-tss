@@ -114,10 +114,12 @@ impl EchoGadget {
             match remote_echo {
                 Ok((peer_id, hash)) => {
                     if hash != echo_hash {
-                        println!("Echo: Hash mismatch! Local hash (first 8 bytes): {:02x?}, Remote hash (first 8 bytes): {:02x?}, Peer: {}", 
-                            &echo_hash[..8.min(echo_hash.len())], 
+                        println!(
+                            "Echo: Hash mismatch! Local hash (first 8 bytes): {:02x?}, Remote hash (first 8 bytes): {:02x?}, Peer: {}",
+                            &echo_hash[..8.min(echo_hash.len())],
                             &hash[..8.min(hash.len())],
-                            peer_id);
+                            peer_id,
+                        );
                         return Err(crate::Error::InconsistentEcho(index as u16));
                     } else {
                         println!("Echo: Hash match with peer {}", peer_id);

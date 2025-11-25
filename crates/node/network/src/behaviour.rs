@@ -141,6 +141,19 @@ impl Behaviour {
         );
     }
 
+    pub fn register_room(
+        &mut self,
+        room_id: RoomId,
+        inbound_queue: mpsc::Sender<request_responses::IncomingRequest>,
+    ) -> Result<(), request_responses::RegisterError> {
+        let protocol_id = room_id.protocol_name();
+        self.request_responses
+            .register_protocol(request_responses::ProtocolConfig::new(
+                protocol_id,
+                Some(inbound_queue),
+            ))
+    }
+
     /// Bootstrap Kademlia network.
     pub fn bootstrap(&mut self) -> Result<QueryId, String> {
         self.discovery.bootstrap()

@@ -5,10 +5,11 @@ use crate::{
     request_responses::IfDisconnected,
     request_responses::MessageContext,
     request_responses::RequestFailure,
-    NodeKeyConfig, RoomId,
+    NodeKeyConfig, RoomId, SessionError, SessionManager,
 };
 use async_std::channel::{unbounded, Receiver, Sender};
 use futures::channel::mpsc;
+use futures::channel::oneshot;
 use futures::select;
 use futures_util::stream::StreamExt;
 use libp2p::core::transport::upgrade;
@@ -33,6 +34,13 @@ pub enum ServicetoWorkerMsg {
         room_id: RoomId,
         context: MessageContext,
         message: MessageIntent,
+    },
+    OpenRoom {
+        room_id: RoomId,
+        max_size: usize,
+        respond_to: oneshot::Sender<
+            Result<mpsc::Receiver<request_responses::IncomingRequest>, SessionError>,
+        >,
     },
 }
 
@@ -66,6 +74,7 @@ pub struct NetworkWorker {
     network_service: Swarm<Behaviour>,
     /// Messages from the [`NetworkService`] that must be processed.
     from_service: Receiver<ServicetoWorkerMsg>,
+    sessions: SessionManager,
     // / The `PeerId`'s of all boot nodes.
     // boot_node_ids: Arc<HashSet<PeerId>>,
 }
@@ -138,6 +147,7 @@ impl NetworkWorker {
             local_peer_id,
             network_service: swarm,
             from_service,
+            sessions: SessionManager::default(),
             service: Arc::new(service),
         };
 
@@ -157,6 +167,7 @@ impl NetworkWorker {
             warn!("Failed to bootstrap with Kademlia: {}", e);
         }
 
+        let mut sessions = self.sessions;
         let mut swarm_stream = self.network_service.fuse();
         let mut network_stream = self.from_service.fuse();
 
@@ -197,6 +208,10 @@ impl NetworkWorker {
                         let behaviour = swarm_stream.get_mut().behaviour_mut();
 
                         match request {
+                            ServicetoWorkerMsg::OpenRoom { room_id, max_size, respond_to } => {
+                                let result = sessions.claim_or_create(behaviour, room_id, max_size);
+                                let _ = respond_to.send(result);
+                            }
                             ServicetoWorkerMsg::Request {
                                 room_id,
                                 context,
@@ -250,6 +265,24 @@ impl NetworkWorker {
 }
 
 impl NetworkService {
+    pub async fn open_room(
+        &self,
+        room_id: RoomId,
+        max_size: usize,
+    ) -> Result<mpsc::Receiver<request_responses::IncomingRequest>, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.to_worker
+            .send(ServicetoWorkerMsg::OpenRoom {
+                room_id,
+                max_size,
+                respond_to: tx,
+            })
+            .await
+            .expect("expected worker worker channel to not be full");
+
+        rx.await.map_err(|_| SessionError::ChannelClosed)??
+    }
+
     pub async fn broadcast_message(
         &self,
         room_id: &RoomId,

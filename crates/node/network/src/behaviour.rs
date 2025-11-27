@@ -1,4 +1,4 @@
-use crate::discovery::{DiscoveryBehaviour, DiscoveryEvent};
+use crate::discovery::{DiscoveryBehaviour, DiscoveryOut};
 use crate::request_responses::ResponseFailure;
 use crate::{request_responses, request_responses::MessageContext, Params, RoomId};
 use futures::channel::mpsc;
@@ -38,7 +38,7 @@ pub enum BehaviourEvent {
         result: Result<Duration, ResponseFailure>,
     },
     RequestResponse(request_responses::Event),
-    Discovery(DiscoveryEvent),
+    Discovery(DiscoveryOut),
     Identify(identify::Event),
     Ping(ping::Event),
 }
@@ -60,8 +60,8 @@ impl From<request_responses::Event> for BehaviourEvent {
     }
 }
 
-impl From<DiscoveryEvent> for BehaviourEvent {
-    fn from(event: DiscoveryEvent) -> Self {
+impl From<DiscoveryOut> for BehaviourEvent {
+    fn from(event: DiscoveryOut) -> Self {
         BehaviourEvent::Discovery(event)
     }
 }

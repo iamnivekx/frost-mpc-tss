@@ -78,13 +78,21 @@ impl<T: ProtocolAgentFactory + Send + Unpin> Worker<T> {
                                     }
                                 }
                                 Entry::Vacant(_) => {
-                                    // Dynamically create room if it doesn't exist
-                                    // Create a virtual receiver for the room (network layer may not know about it yet)
-                                    // Note: We keep virtual_tx to prevent the receiver from closing
-                                    let (_virtual_tx, virtual_rx) = mpsc::channel(1000);
+                                    let room_rx = match network_service
+                                        .open_room(room_id.clone(), n as usize)
+                                        .await
+                                    {
+                                        Ok(rx) => rx,
+                                        Err(e) => {
+                                            let _ = sender
+                                                .send(Err(anyhow!("failed to open room: {e:?}")));
+                                            continue;
+                                        }
+                                    };
+
                                     let (ch, tx) = coordination::Phase1Channel::new(
                                         room_id.clone(),
-                                        virtual_rx,
+                                        room_rx,
                                         network_service.clone(),
                                     );
                                     rooms_coordination.push(ch);
@@ -122,13 +130,21 @@ impl<T: ProtocolAgentFactory + Send + Unpin> Worker<T> {
                                     }
                                 }
                                 Entry::Vacant(_) => {
-                                    // Dynamically create room if it doesn't exist
-                                    // Create a virtual receiver for the room (network layer may not know about it yet)
-                                    // Note: We keep virtual_tx to prevent the receiver from closing
-                                    let (_virtual_tx, virtual_rx) = mpsc::channel(1000);
+                                    let room_rx = match network_service
+                                        .open_room(room_id.clone(), n as usize)
+                                        .await
+                                    {
+                                        Ok(rx) => rx,
+                                        Err(e) => {
+                                            let _ = sender
+                                                .send(Err(anyhow!("failed to open room: {e:?}")));
+                                            continue;
+                                        }
+                                    };
+
                                     let (ch, tx) = coordination::Phase1Channel::new(
                                         room_id.clone(),
-                                        virtual_rx,
+                                        room_rx,
                                         network_service.clone(),
                                     );
                                     rooms_coordination.push(ch);

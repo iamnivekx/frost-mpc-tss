@@ -31,7 +31,7 @@ impl EchoGadget {
 
     pub async fn wrap_execution(
         mut self,
-         computation_fut: impl Future<Output = crate::Result<()>> + Unpin,
+        computation_fut: impl Future<Output = crate::Result<()>> + Unpin,
     ) -> crate::Result<()> {
         let mut echo = Box::pin(self.proceed_round().fuse());
         let future = computation_fut.fuse();
@@ -68,8 +68,12 @@ impl EchoGadget {
         // Sort messages by sender to ensure consistent ordering
         let mut msgs_vec: Vec<_> = self.msgs.drain().collect();
         msgs_vec.sort_by_key(|m| m.sender);
-        
-        println!("Echo: Collected {} messages from senders: {:?}", msgs_vec.len(), msgs_vec.iter().map(|m| m.sender).collect::<Vec<_>>());
+
+        println!(
+            "Echo: Collected {} messages from senders: {:?}",
+            msgs_vec.len(),
+            msgs_vec.iter().map(|m| m.sender).collect::<Vec<_>>()
+        );
 
         let mut hasher = Blake2s256::new();
         let mut incoming_acks = vec![];
@@ -110,10 +114,12 @@ impl EchoGadget {
             match remote_echo {
                 Ok((peer_id, hash)) => {
                     if hash != echo_hash {
-                        println!("Echo: Hash mismatch! Local hash (first 8 bytes): {:02x?}, Remote hash (first 8 bytes): {:02x?}, Peer: {}", 
-                            &echo_hash[..8.min(echo_hash.len())], 
+                        println!(
+                            "Echo: Hash mismatch! Local hash (first 8 bytes): {:02x?}, Remote hash (first 8 bytes): {:02x?}, Peer: {}",
+                            &echo_hash[..8.min(echo_hash.len())],
                             &hash[..8.min(hash.len())],
-                            peer_id);
+                            peer_id,
+                        );
                         return Err(crate::Error::InconsistentEcho(index as u16));
                     } else {
                         println!("Echo: Hash match with peer {}", peer_id);

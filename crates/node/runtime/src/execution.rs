@@ -262,7 +262,7 @@ impl Future for ProtocolExecution {
                     echo_tx,
                     agent_future,
                     pending_futures,
-                    storage: storage,
+                    storage,
                     pending_response,
                     i,
                     n,

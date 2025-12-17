@@ -34,17 +34,17 @@ impl From<Error> for RpcError {
         match e {
             Error::DagCborError(e) => RpcError {
                 code: RpcErrorCode::ServerError(BASE_ERROR + 1),
-                message: format!("Resulted an unexpected output Error: {}", e).into(),
+                message: format!("Resulted an unexpected output Error: {}", e),
                 data: None,
             },
             Error::Terminated(e) => RpcError {
                 code: RpcErrorCode::ServerError(BASE_ERROR + 2),
-                message: format!("Computation terminated with err: {}", e).into(),
+                message: format!("Computation terminated with err: {}", e),
                 data: Some(e.to_string().into()),
             },
             Error::Canceled(e) => RpcError {
                 code: RpcErrorCode::ServerError(BASE_ERROR),
-                message: format!("Computation canceled with err: {}", e).into(),
+                message: format!("Computation canceled with err: {}", e),
                 data: Some(e.to_string().into()),
             },
         }

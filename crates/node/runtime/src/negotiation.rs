@@ -107,7 +107,7 @@ impl Future for NegotiationChannel {
                             peerset: peerset.clone(),
                             body: request.clone(),
                         };
-                        pending_futures.push(
+                        pending_futures.push_back(
                             service
                                 .clone()
                                 .multicast_message_owned(
@@ -159,7 +159,7 @@ impl Future for NegotiationChannel {
                 peers.len()
             );
             let (tx, rx) = mpsc::channel((n - 1) as usize);
-            pending_futures.push(
+            pending_futures.push_back(
                 service
                     .clone()
                     .broadcast_message_owned(

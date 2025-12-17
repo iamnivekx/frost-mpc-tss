@@ -66,8 +66,8 @@ impl<T: DeserializeOwned + Unpin, E: Display> Future for AsyncResult<T, E> {
     type Output = RpcResult<T>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        return match self.rx.try_recv() {
-            Ok(Some(Ok(value))) => match serde_ipld_dagcbor::from_slice(&*value) {
+        match self.rx.try_recv() {
+            Ok(Some(Ok(value))) => match serde_ipld_dagcbor::from_slice(&value) {
                 Ok(result) => Poll::Ready(Ok(result)),
                 Err(e) => {
                     debug!("RPC: Failed to deserialize result: {}", e);
@@ -86,7 +86,7 @@ impl<T: DeserializeOwned + Unpin, E: Display> Future for AsyncResult<T, E> {
                 println!("RPC: Channel error: {}", e);
                 Poll::Ready(Err(TssError::from(e).into()))
             }
-        };
+        }
     }
 }
 

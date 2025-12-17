@@ -63,7 +63,7 @@ impl<T: DeserializeOwned + Unpin> Future for AsyncResult<T> {
     type Output = RpcResult<T>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        return match self.rx.try_recv() {
+        match self.rx.try_recv() {
             Ok(Some(value)) => Poll::Ready(
                 serde_json::from_str(&value).map_err(|e| SystemError::from(e.to_string()).into()),
             ),
@@ -72,7 +72,7 @@ impl<T: DeserializeOwned + Unpin> Future for AsyncResult<T> {
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(SystemError::from(e).into())),
-        };
+        }
     }
 }
 

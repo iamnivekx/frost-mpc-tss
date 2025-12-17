@@ -39,11 +39,11 @@ impl Command {
         let path_str = self
             .path
             .to_string()
-            .replace(":id", &*local_peer_id.to_base58());
+            .replace(":id", &local_peer_id.to_base58());
         let base_path = Path::new(&path_str);
-        let node_key = NodeKeyConfig::Ed25519(Secret::File(base_path.join("secret.key")).into());
+        let node_key = NodeKeyConfig::Ed25519(Secret::File(base_path.join("secret.key")));
 
-        let boot_nodes: Vec<_> = config.boot_nodes.iter().map(|p| p.clone()).collect();
+        let boot_nodes: Vec<_> = config.boot_nodes.to_vec();
 
         let (room_id, room_cfg, room_rx) = RoomConfig::new_full(
             "tss/0".to_string(),
@@ -74,7 +74,7 @@ impl Command {
                 format!("data/{}/key.share", local_peer_id.to_base58()),
                 Curve::Ed25519,
             ),
-            LocalStorage::new(base_path.join("peerset"), local_peer_id.clone()),
+            LocalStorage::new(base_path.join("peerset"), local_peer_id),
         );
 
         let rt_task = task::spawn(async {

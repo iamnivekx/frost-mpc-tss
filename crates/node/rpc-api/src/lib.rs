@@ -4,8 +4,8 @@ pub mod system;
 pub mod tss;
 
 pub use client::new_client;
-pub use jsonrpc_core::{
-    BoxFuture as RpcFuture, Error as RpcError, ErrorCode as RpcErrorCode, Result as RpcResult,
-};
-pub use system::SystemApi;
-pub use tss::{error::Error as TssError, TssApi, TssApiClient};
+pub use jsonrpsee::types::ErrorObjectOwned as RpcError;
+pub type RpcResult<T> = Result<T, RpcError>;
+pub use jsonrpsee::RpcModule as JsonRpcModule;
+pub use system::{SystemApiClient, SystemApiServer};
+pub use tss::{error::Error as TssError, TssApiClient, TssApiServer};

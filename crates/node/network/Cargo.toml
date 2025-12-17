@@ -40,7 +40,6 @@ uuid = { workspace = true }
 # Collections
 smallvec = { workspace = true }
 arrayvec = { workspace = true }
-parking_lot = { workspace = true }
 
 # Cryptography
 blake3 = { workspace = true }

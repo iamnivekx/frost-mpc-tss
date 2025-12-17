@@ -29,6 +29,9 @@ futures-util = { version = "0.3.31" }
 tokio = { version = "1", default-features = false, features = [
     "macros",
     "rt-multi-thread",
+    "net",
+    "sync",
+    "time",
 ] }
 async-std = { version = "1.11.0", features = [
     "attributes",
@@ -76,25 +79,24 @@ zeroize = { version = "1.5.4" }
 
 # Collections
 smallvec = { version = "1.8.0" }
-arrayvec = { version = "0.7" }
-parking_lot = { version = "0.12.0" }
+arrayvec = { version = "0.7.6" }
 
 # Codec
 parity-scale-codec = { version = "3.1.2" }
 
 # FROST
-round-based = { version = "0.1.4" }
 frost-ed25519 = { version = "2.2.0" }
 frost-secp256k1 = { version = "2.2.0" }
 frost-core = { version = "2.2.0" }
 rand = { version = "0.8" }
-rand_core = { version = "0.6" }
 
 # JSON-RPC
-jsonrpc-core = { version = "18" }
-jsonrpc-derive = { version = "18" }
-jsonrpc-ws-server = { version = "18" }
-jsonrpc-core-client = { version = "18", features = ["ws"] }
+jsonrpsee = { version = "0.26.0", features = [
+    "server",
+    "client",
+    "macros",
+    "ws-client",
+] }
 
 # Environment
 dotenvy = { version = "0.15.7" }

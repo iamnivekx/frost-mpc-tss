@@ -1577,7 +1577,7 @@ mod tests {
                         swarm_1.behaviour_mut().send_request(
                             &peer_id,
                             protocol_name_2,
-                            ctx.clone(),
+                            ctx,
                             b"this is a request".to_vec(),
                             sender_2,
                             IfDisconnected::ImmediateError,

@@ -3,11 +3,11 @@ This project implements [`rust-libp2p`](https://github.com/libp2p/rust-libp2p) t
 
 The protocol used here is [FROST (Flexible Round-Optimized Schnorr Threshold signatures)](https://datatracker.ietf.org/doc/html/rfc9591), which is a threshold signature scheme supporting both Ed25519 and secp256k1 curves. The implementation uses [`frost-ed25519`](https://crates.io/crates/frost-ed25519) and [`frost-secp256k1`](https://crates.io/crates/frost-secp256k1) libraries.
 
-This codebase aims to follow the modular design of `rust-libp2p`, so could be repurposed to support other elliptic curves and signing schemes, assuming they are intended to be run in the [round-based](https://docs.rs/round-based/latest/round_based/index.html) flow of MPC.
+This codebase aims to follow the modular design of `rust-libp2p`, so it could be repurposed to support other elliptic curves and signing schemes that follow a round-based MPC protocol flow.
 
 ## Acknowledgments
 
-This project is inspired by and builds upon the architecture of [tss-libp2p](https://github.com/nulltea/tss-libp2p), which implements threshold ECDSA using the GG20 protocol. 
+This project is inspired by and builds upon the architecture of [tss-libp2p](https://github.com/nulltea/tss-libp2p), which implements threshold ECDSA using the GG20 protocol.
 
 **Key differences from the original project:**
 - **Protocol**: Uses FROST (Schnorr threshold signatures) instead of GG20 (ECDSA threshold signatures)
@@ -19,14 +19,14 @@ The core networking layer, runtime coordination, and RPC interfaces follow simil
 
 ## Project structure
 - `crates/node`: MPC node daemon
-  - `network`: libp2p networking stack (broadcast, discovery).
-  - `runtime`: engine between network and application layers responsible for orchestrating MPC communication and pre-computation coordination.
-  - `rpc`: [`jsonrpc`](https://github.com/paritytech/jsonrpc) server, client, and API trait.
-  - `rpc-api`: implements API trait.
+  - `network`: libp2p networking stack (broadcast, discovery)
+  - `runtime`: engine between network and application layers responsible for orchestrating MPC communication and pre-computation coordination
+  - `rpc`: [`jsonrpc`](https://github.com/paritytech/jsonrpc) server, client, and API trait
+  - `rpc-api`: implements API trait
 - `crates/tss`: application layer implementing FROST MPC protocols
   - `keygen`: FROST distributed key generation (DKG)
   - `keysign`: FROST threshold signing
-- `crates/cli`: helpful CLI for deploying node and interacting with it over JsonRPC.
+- `crates/cli`: helpful CLI for deploying node and interacting with it over JsonRPC
 
 ## Design principles
 
@@ -36,12 +36,12 @@ The underlying networking protocol is structured around the "room" abstraction. 
 ### Single Proposer; Multiple Joiners
 Pre-computation coordination is encoded as session types (see [blog post](https://cathieyun.medium.com/bulletproof-multi-party-computation-in-rust-with-session-types-b3da6e928d5d)) and follows a predefined flow where one party broadcasts a computation proposal and other parties in the room can answer.
 
-Along with the proposal specifying protocol by its id, the Proposer can include an arbitrary challenge serving as means of negotiation (e.g. ask to prove that party has a key share).
+Along with the proposal specifying protocol by its id, the Proposer can include an arbitrary challenge serving as a means of negotiation (e.g. ask to prove that party has a key share).
 
 After the Proposer sourced enough Joiners, she broadcasts a start message specifying chosen parties and arbitrary arguments relevant for the MPC (e.g. message to be signed).
 
 ### Echo broadcast
-To ensure reliable broadcast during computation, messages on wire are being echoed, i.e. echo broadcast: once messages from all known parties are received, relayers hash vector containing these messages along with their own ones and send it as an acknowledgment. Assuming relayers sort vectors in the same way (e.g. by party indexes) and all of them received consistent sets of messages, hashes will end up identical and broadcast reliability will be proven.
+To ensure reliable broadcast during computation, messages on wire are being echoed, i.e., echo broadcast: once messages from all known parties are received, relayers hash vector containing these messages along with their own ones and send it as an acknowledgment. Assuming relayers sort vectors in the same way (e.g. by party indexes) and all of them received consistent sets of messages, hashes will end up identical and broadcast reliability will be proven.
 
 ## Instructions
 
@@ -63,7 +63,7 @@ cargo run -p mpc-cli setup \
 **Note**: Make sure to populate the `boot_peers` array in each created config file for parties to be able to find each other through peer discovery.
 
 ### Run node
-The following command will start an MPC node with the specified config and setup path (resolved by default using the `:id` pattern mentioned above). For peer discovery, you can use Kademlia (`--kademlia`), MDNS (`--mdns`), both, or neither:
+The following command will start an MPC node with the specified config and setup path (resolved by default using the `:id` pattern mentioned above). For peer discovery, you can use Kademlia (`--kademlia`), mDNS (`--mdns`), both, or neither:
 
 ```bash
 cargo run -p mpc-cli node \
@@ -96,14 +96,14 @@ The following command will propose to jointly sign a message with `threshold+1` 
 ```bash
 # Using long options
 cargo run -p mpc-cli sign \
-  --address ws://127.0.0.1:8080 \
+  --address ws://127.0.0.1:8090 \
   --room tss/0 \
   --threshold 2 \
   --messages "hello"
 
 # Or using short options
 cargo run -p mpc-cli sign \
-  -a ws://127.0.0.1:8080 \
+  -a ws://127.0.0.1:8090 \
   -r tss/0 \
   --threshold 2 \
   --messages "hello"
@@ -114,7 +114,7 @@ cargo run -p mpc-cli sign \
 ## Features
 - **FROST threshold signatures**: Supports both Ed25519 and secp256k1 curves
 - **Distributed Key Generation (DKG)**: Generate threshold keys without a trusted dealer
-- **Threshold Signing**: Sign messages with threshold number of parties
+- **Threshold Signing**: Sign messages with a threshold number of parties
 - **P2P Networking**: Built on libp2p for decentralized communication
 - **ECDSA Format Support**: Converts FROST Schnorr signatures to ECDSA format for compatibility with existing systems
 - **Multiple Discovery Methods**: Supports Kademlia DHT and mDNS for peer discovery
@@ -129,4 +129,4 @@ cargo run -p mpc-cli sign \
 
 ## Warning
 **Do not use this in production.** Code here hasn't been audited and is likely not stable.  
-It is no more that a prototype for learning and having fun doing it.
+It is no more than a prototype for learning and having fun doing it.

@@ -1,5 +1,5 @@
 use crate::keysign::PublicKey;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use frost_core::{
     keys::dkg::{part1, part2, part3, round1, round2},
     Ciphersuite, Identifier,
@@ -7,11 +7,14 @@ use frost_core::{
 use mpc_network::Curve;
 use mpc_runtime::{IncomingRequest, OutgoingResponse, Peerset};
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::{BufReader, Write};
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::{BufReader, Write},
+    path::Path,
+};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct KeyShare {
     pub curve: Curve,
     pub identifier: u16,
@@ -198,12 +201,12 @@ impl KeyGen {
         // Receive round 1 packages from all other parties
         // Note: part2 expects round1_packages to contain packages from OTHER parties only (max_signers - 1)
         // We need to collect all packages including our own for part3, but part2 only needs others'
-        let mut round1_packages_for_part2 = std::collections::BTreeMap::new();
-        let mut round1_packages_all = std::collections::BTreeMap::new();
+        let mut round1_packages_for_part2 = BTreeMap::new();
+        let mut round1_packages_all = BTreeMap::new();
         round1_packages_all.insert(identifier_id, round1_package.clone());
 
         // Collect all expected identifiers
-        let mut expected_ids = std::collections::BTreeSet::new();
+        let mut expected_ids = BTreeSet::new();
         for u in 1..=max_signers {
             if let Ok(id) = Identifier::try_from(u) {
                 expected_ids.insert(id);
@@ -268,7 +271,7 @@ impl KeyGen {
         );
 
         // Create a mapping from Identifier to u16 for recipient lookup
-        let mut id_to_u16 = std::collections::BTreeMap::new();
+        let mut id_to_u16 = BTreeMap::new();
         for u in 1..=max_signers {
             if let Ok(id) = Identifier::try_from(u) {
                 id_to_u16.insert(id, u);
@@ -298,8 +301,8 @@ impl KeyGen {
 
         // Receive round 2 packages from all other parties
         // Each party sends us one package, so we expect max_signers - 1 packages
-        let mut round2_packages = std::collections::BTreeMap::new();
-        let mut received_senders = std::collections::BTreeSet::new();
+        let mut round2_packages = BTreeMap::new();
+        let mut received_senders = BTreeSet::new();
 
         while round2_packages.len() < (max_signers - 1) as usize {
             let req = incoming
@@ -352,17 +355,16 @@ impl KeyGen {
 
     fn save_key_share(&self, key_share: KeyShare) -> anyhow::Result<Vec<u8>> {
         let path = Path::new(self.path.as_str());
-        let dir = path.parent().unwrap();
-        std::fs::create_dir_all(dir).unwrap();
+        let dir = path.parent().context("failed to get parent directory")?;
+        fs::create_dir_all(dir).context("failed to create directory")?;
 
-        let mut file = File::create(path)
-            .map_err(|e| anyhow!("writing share to disk terminated with error: {e}"))?;
+        let mut file = fs::File::create(path).context("failed to create key share file")?;
 
-        let share_bytes = serde_json::to_vec(&key_share)
-            .map_err(|e| anyhow!("share serialization terminated with error: {e}"))?;
+        let share_bytes =
+            serde_json::to_vec(&key_share).context("failed to serialize key share")?;
 
         file.write_all(&share_bytes)
-            .map_err(|e| anyhow!("error writing local key to file: {e}"))?;
+            .context("failed to write local key to file")?;
 
         Ok(key_share.group_public_key)
     }

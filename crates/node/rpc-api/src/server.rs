@@ -1,31 +1,36 @@
-use crate::TssApi;
 use anyhow::anyhow;
-use jsonrpc_core::IoHandler;
-use jsonrpc_ws_server::{Server, ServerBuilder};
+use jsonrpsee::server::{ServerBuilder, ServerHandle};
+use std::net::SocketAddr;
 
 pub struct JsonRPCServer {
-    server: Server,
+    handle: ServerHandle,
 }
 
 impl JsonRPCServer {
-    pub fn new<T>(config: Config, tss: T) -> Result<Self, anyhow::Error>
+    pub async fn new<T>(
+        config: Config,
+        module: jsonrpsee::RpcModule<T>,
+    ) -> Result<Self, anyhow::Error>
     where
-        T: TssApi,
+        T: Send + Sync + 'static,
     {
-        let mut io = IoHandler::new();
-        io.extend_with(tss.to_delegate());
+        let addr: SocketAddr = config
+            .host_address
+            .parse()
+            .map_err(|e| anyhow!("invalid rpc host_address '{}': {e}", config.host_address))?;
 
-        let server = ServerBuilder::new(io)
-            .start(&config.host_address.parse().unwrap())
-            .map_err(|e| anyhow!("json rpc server start terminated with err: {:?}", e))?;
+        let server = ServerBuilder::default()
+            .build(addr)
+            .await
+            .map_err(|e| anyhow!("jsonrpsee server build failed: {e}"))?;
 
-        Ok(Self { server })
+        let handle = server.start(module);
+        Ok(Self { handle })
     }
 
     pub async fn run(self) -> Result<(), anyhow::Error> {
-        self.server
-            .wait()
-            .map_err(|e| anyhow!("running json rpc server terminated with err: {:?}", e))
+        self.handle.stopped().await;
+        Ok(())
     }
 }
 

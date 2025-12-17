@@ -1,13 +1,14 @@
 use anyhow::anyhow;
-use async_std::task;
 use clap::Parser;
 use mpc_network::{Curve, NetworkWorker, NodeKeyConfig, Params, RoomId, Secret};
 use mpc_rpc::Tss;
 use mpc_rpc_api::server::JsonRPCServer;
+use mpc_rpc_api::TssApiServer;
 use mpc_runtime::{new_worker_and_service, LocalStorage};
 use mpc_tss::{Config, TssFactory};
 use std::iter;
 use std::path::Path;
+use tokio::task;
 use tracing::info;
 
 #[derive(Debug, Parser, Clone)]
@@ -39,11 +40,11 @@ impl Command {
         let path_str = self
             .path
             .to_string()
-            .replace(":id", &*local_peer_id.to_base58());
+            .replace(":id", &local_peer_id.to_base58());
         let base_path = Path::new(&path_str);
-        let node_key = NodeKeyConfig::Ed25519(Secret::File(base_path.join("secret.key")).into());
+        let node_key = NodeKeyConfig::Ed25519(Secret::File(base_path.join("secret.key")));
 
-        let boot_nodes: Vec<_> = config.boot_nodes.iter().map(|p| p.clone()).collect();
+        let boot_nodes: Vec<_> = config.boot_nodes.to_vec();
 
         let params = Params {
             listen_address: local_party.network_peer.multiaddr.clone(),
@@ -74,7 +75,7 @@ impl Command {
                 format!("data/{}/key.share", local_peer_id.to_base58()),
                 Curve::Ed25519,
             ),
-            LocalStorage::new(base_path.join("peerset"), local_peer_id.clone()),
+            LocalStorage::new(base_path.join("peerset"), local_peer_id),
         );
 
         let rt_task = task::spawn(async {
@@ -82,20 +83,23 @@ impl Command {
         });
 
         let rpc_server = {
-            let handler = Tss::new(rt_service);
+            let tss = Tss::new(rt_service);
             JsonRPCServer::new(
                 mpc_rpc_api::server::Config {
                     host_address: local_party.rpc_addr,
                 },
-                handler,
+                tss.into_rpc(),
             )
+            .await
             .map_err(|e| anyhow!("json rpc server terminated with err: {}", e))?
         };
 
         rpc_server.run().await.expect("expected RPC server to run");
 
-        let _ = rt_task.cancel().await;
-        let _ = net_task.cancel().await;
+        rt_task.abort();
+        net_task.abort();
+        let _ = rt_task.await;
+        let _ = net_task.await;
 
         info!("Node stopped");
 

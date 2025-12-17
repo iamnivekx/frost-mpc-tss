@@ -46,8 +46,8 @@ impl Future for Phase1Channel {
     type Output = Phase1Msg;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.rx.as_mut().unwrap().try_next() {
-            Ok(Some(msg)) => match msg.context.message_type {
+        if let Ok(Some(msg)) = self.rx.as_mut().unwrap().try_next() {
+            match msg.context.message_type {
                 MessageType::Coordination => {
                     println!(
                         "Phase1Channel: Received coordination message from peer {}, room: {:?}",
@@ -59,7 +59,7 @@ impl Future for Phase1Channel {
                         payload: msg.payload,
                         response_tx: msg.pending_response,
                         channel: Phase2Channel {
-                            id: self.id.clone(),
+                            id: self.id,
                             rx: self.rx.take(),
                             timeout: stream::interval(Duration::from_secs(15)),
                             network_service: self.network_service.clone(),
@@ -75,8 +75,7 @@ impl Future for Phase1Channel {
                         sent_feedback: None,
                     });
                 }
-            },
-            _ => {}
+            }
         }
 
         if let Some(LocalRpcMsg {
@@ -90,7 +89,7 @@ impl Future for Phase1Channel {
                 id: self.id.clone(),
                 n,
                 negotiation: NegotiationChannel::new(
-                    self.id.clone(),
+                    self.id,
                     self.rx.take().unwrap(),
                     n,
                     request,

@@ -1,12 +1,11 @@
-use crate::tss::TssApiClient;
 use anyhow::anyhow;
-use jsonrpc_core_client::transports::ws;
+use jsonrpsee::ws_client::WsClientBuilder;
 
-pub async fn new_client(addr: String) -> Result<TssApiClient, anyhow::Error> {
-    let url = addr.parse()?;
-    let client = ws::connect::<TssApiClient>(&url)
+pub async fn new_client(addr: &str) -> Result<jsonrpsee::ws_client::WsClient, anyhow::Error> {
+    let client = WsClientBuilder::new()
+        .build(addr)
         .await
-        .map_err(|e| anyhow!("node connection terminated w/ err: {:?}", e))?;
+        .map_err(|e| anyhow!("node connection terminated w/ err: {e}"))?;
 
     Ok(client)
 }

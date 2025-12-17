@@ -1,14 +1,14 @@
 pub mod error;
-use jsonrpc_core::BoxFuture;
-use jsonrpc_derive::rpc;
+use crate::RpcResult;
+use jsonrpsee::proc_macros::rpc;
 
-#[rpc]
+#[rpc(server, client, namespace = "system")]
 pub trait SystemApi {
     /// Returns the base58-encoded PeerId of the node.
-    #[rpc(name = "system_localPeerId", returns = "String")]
-    fn system_local_peer_id(&self) -> BoxFuture<jsonrpc_core::Result<String>>;
+    #[method(name = "localPeerId")]
+    async fn local_peer_id(&self) -> RpcResult<String>;
 
     /// Returns currently connected peers
-    #[rpc(name = "system_peers", returns = "Vec<String>")]
-    fn system_peers(&self) -> BoxFuture<jsonrpc_core::Result<Vec<String>>>;
+    #[method(name = "peers")]
+    async fn peers(&self) -> RpcResult<Vec<String>>;
 }

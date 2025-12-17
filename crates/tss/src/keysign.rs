@@ -12,13 +12,13 @@ use std::{
     fs,
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PublicKey {
     pub curve: Curve,
     pub bytes: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Signature {
     pub curve: Curve,
     pub pub_key: Vec<u8>,

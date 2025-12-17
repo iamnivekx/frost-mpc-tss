@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use clap::Parser;
 use mpc_rpc_api::new_client;
+use mpc_rpc_api::TssApiClient;
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -26,7 +27,7 @@ pub struct Command {
 impl Command {
     /// Execute `sign` command
     pub async fn execute(self) -> anyhow::Result<()> {
-        let res = new_client(self.address)
+        let res = new_client(&self.address)
             .await?
             .sign(self.room, self.threshold, self.messages.as_bytes().to_vec())
             .await

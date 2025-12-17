@@ -1,6 +1,5 @@
-use crate::{RpcError, RpcErrorCode};
+use crate::RpcError;
 use futures::channel::oneshot::Canceled;
-// use std::fmt::Display;
 
 /// TSS RPC errors.
 #[derive(Debug, thiserror::Error)]
@@ -27,26 +26,26 @@ impl From<String> for Error {
 }
 
 /// Base code for all tss errors.
-const BASE_ERROR: i64 = 1000;
+const BASE_ERROR: i32 = 1000;
 
 impl From<Error> for RpcError {
     fn from(e: Error) -> Self {
         match e {
-            Error::DagCborError(e) => RpcError {
-                code: RpcErrorCode::ServerError(BASE_ERROR + 1),
-                message: format!("Resulted an unexpected output Error: {}", e),
-                data: None,
-            },
-            Error::Terminated(e) => RpcError {
-                code: RpcErrorCode::ServerError(BASE_ERROR + 2),
-                message: format!("Computation terminated with err: {}", e),
-                data: Some(e.to_string().into()),
-            },
-            Error::Canceled(e) => RpcError {
-                code: RpcErrorCode::ServerError(BASE_ERROR),
-                message: format!("Computation canceled with err: {}", e),
-                data: Some(e.to_string().into()),
-            },
+            Error::DagCborError(msg) => RpcError::owned(
+                BASE_ERROR + 1,
+                format!("Resulted an unexpected output Error: {msg}"),
+                None::<()>,
+            ),
+            Error::Terminated(msg) => RpcError::owned(
+                BASE_ERROR + 2,
+                format!("Computation terminated with err: {msg}"),
+                Some(msg),
+            ),
+            Error::Canceled(e) => RpcError::owned(
+                BASE_ERROR + 3,
+                format!("Computation canceled with err: {e}"),
+                Some(e.to_string()),
+            ),
         }
     }
 }

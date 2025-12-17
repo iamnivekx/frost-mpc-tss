@@ -96,14 +96,14 @@ The following command will propose to jointly sign a message with `threshold+1` 
 ```bash
 # Using long options
 cargo run -p mpc-cli sign \
-  --address ws://127.0.0.1:8080 \
+  --address ws://127.0.0.1:8090 \
   --room tss/0 \
   --threshold 2 \
   --messages "hello"
 
 # Or using short options
 cargo run -p mpc-cli sign \
-  -a ws://127.0.0.1:8080 \
+  -a ws://127.0.0.1:8090 \
   -r tss/0 \
   --threshold 2 \
   --messages "hello"

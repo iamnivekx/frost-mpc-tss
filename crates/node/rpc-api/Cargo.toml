@@ -10,7 +10,6 @@ mpc-network = { workspace = true }
 
 # Async runtime
 futures = { workspace = true }
-async-std = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }
@@ -20,7 +19,4 @@ thiserror = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 
 # JSON-RPC
-jsonrpc-core = { workspace = true }
-jsonrpc-derive = { workspace = true }
-jsonrpc-ws-server = { workspace = true }
-jsonrpc-core-client = { workspace = true }
+jsonrpsee = { workspace = true }

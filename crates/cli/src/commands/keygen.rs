@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use clap::Parser;
 use mpc_rpc_api::new_client;
+use mpc_rpc_api::TssApiClient;
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -26,11 +27,11 @@ pub struct Command {
 impl Command {
     /// Execute `keygen` command
     pub async fn execute(self) -> anyhow::Result<()> {
-        let pub_key = new_client(self.address)
+        let pub_key = new_client(&self.address)
             .await?
             .keygen(self.room, self.parties, self.threshold)
             .await
-            .map_err(|e| anyhow!("error keygen: {}", e))?;
+            .map_err(|e| anyhow!("error keygen: {e}"))?;
 
         info!(
             "Keygen finished! curve: {:?}, public key => {:?}",

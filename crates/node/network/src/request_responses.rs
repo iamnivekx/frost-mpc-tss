@@ -282,32 +282,7 @@ impl RequestResponsesBehaviour {
     pub fn new(list: impl Iterator<Item = ProtocolConfig>) -> Result<Self, RegisterError> {
         let mut protocols = HashMap::new();
         for protocol in list {
-            let mut cfg = RequestResponseConfig::default();
-            cfg.set_connection_keep_alive(Duration::from_secs(20));
-            cfg.set_request_timeout(protocol.request_timeout);
-            cfg.set_connection_keep_alive(protocol.request_timeout.add(Duration::from_secs(10)));
-
-            let protocol_support = if protocol.inbound_queue.is_some() {
-                ProtocolSupport::Full
-            } else {
-                ProtocolSupport::Outbound
-            };
-
-            let rq_rp = RequestResponse::new(
-                GenericCodec {
-                    max_request_size: protocol.max_request_size,
-                    max_response_size: protocol.max_response_size,
-                },
-                iter::once((protocol.name.as_bytes().to_vec(), protocol_support)),
-                cfg,
-            );
-
-            match protocols.entry(protocol.name) {
-                Entry::Vacant(e) => e.insert((rq_rp, protocol.inbound_queue)),
-                Entry::Occupied(e) => {
-                    return Err(RegisterError::DuplicateProtocol(e.key().clone()))
-                }
-            };
+            Self::register_protocol_inner(&mut protocols, protocol)?;
         }
 
         Ok(Self {
@@ -318,6 +293,49 @@ impl RequestResponsesBehaviour {
             send_feedback: Default::default(),
             message_request: None,
         })
+    }
+
+    pub fn register_protocol(&mut self, protocol: ProtocolConfig) -> Result<(), RegisterError> {
+        Self::register_protocol_inner(&mut self.protocols, protocol)
+    }
+
+    fn register_protocol_inner(
+        protocols: &mut HashMap<
+            Cow<'static, str>,
+            (
+                RequestResponse<GenericCodec>,
+                Option<mpsc::Sender<IncomingRequest>>,
+            ),
+        >,
+        protocol: ProtocolConfig,
+    ) -> Result<(), RegisterError> {
+        let mut cfg = RequestResponseConfig::default();
+        cfg.set_connection_keep_alive(Duration::from_secs(20));
+        cfg.set_request_timeout(protocol.request_timeout);
+        cfg.set_connection_keep_alive(protocol.request_timeout.add(Duration::from_secs(10)));
+
+        let protocol_support = if protocol.inbound_queue.is_some() {
+            ProtocolSupport::Full
+        } else {
+            ProtocolSupport::Outbound
+        };
+
+        let rq_rp = RequestResponse::new(
+            GenericCodec {
+                max_request_size: protocol.max_request_size,
+                max_response_size: protocol.max_response_size,
+            },
+            iter::once((protocol.name.as_bytes().to_vec(), protocol_support)),
+            cfg,
+        );
+
+        match protocols.entry(protocol.name) {
+            Entry::Vacant(e) => {
+                e.insert((rq_rp, protocol.inbound_queue));
+                Ok(())
+            }
+            Entry::Occupied(e) => Err(RegisterError::DuplicateProtocol(e.key().clone())),
+        }
     }
 
     /// Initiates sending a request.
@@ -1170,11 +1188,11 @@ mod tests {
             transport::{MemoryTransport, Transport},
             upgrade,
         },
-        identity::Keypair,
         noise,
         swarm::{Swarm, SwarmEvent},
         Multiaddr,
     };
+    use libp2p_identity::Keypair;
 
     use std::{iter, time::Duration};
 

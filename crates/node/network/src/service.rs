@@ -1,21 +1,22 @@
 use crate::{
-    behaviour::{Behaviour, BehaviourOut},
+    behaviour::{Behaviour, BehaviourEvent},
     error::Error,
     request_responses,
     request_responses::IfDisconnected,
     request_responses::MessageContext,
     request_responses::RequestFailure,
-    NodeKeyConfig, RoomId,
+    NodeKeyConfig, RoomId, SessionError, SessionManager,
 };
 use async_std::channel::{unbounded, Receiver, Sender};
 use futures::channel::mpsc;
+use futures::channel::oneshot;
 use futures::select;
 use futures_util::stream::StreamExt;
 use libp2p::core::transport::upgrade;
-use libp2p::noise::NoiseConfig;
-use libp2p::swarm::SwarmEvent;
+use libp2p::noise::{Config as NoiseConfig, Keypair as NoiseKeypair, X25519Spec};
+use libp2p::swarm::{SwarmBuilder, SwarmEvent};
 use libp2p::tcp::TcpConfig;
-use libp2p::{mplex, noise, PeerId, Swarm, Transport};
+use libp2p::{mplex, PeerId, Swarm, Transport};
 use std::{borrow::Cow, sync::Arc};
 use tracing::{debug, info, warn};
 
@@ -33,6 +34,13 @@ pub enum ServicetoWorkerMsg {
         room_id: RoomId,
         context: MessageContext,
         message: MessageIntent,
+    },
+    OpenRoom {
+        room_id: RoomId,
+        max_size: usize,
+        respond_to: oneshot::Sender<
+            Result<mpsc::Receiver<request_responses::IncomingRequest>, SessionError>,
+        >,
     },
 }
 
@@ -66,6 +74,7 @@ pub struct NetworkWorker {
     network_service: Swarm<Behaviour>,
     /// Messages from the [`NetworkService`] that must be processed.
     from_service: Receiver<ServicetoWorkerMsg>,
+    sessions: SessionManager,
     // / The `PeerId`'s of all boot nodes.
     // boot_node_ids: Arc<HashSet<PeerId>>,
 }
@@ -89,7 +98,7 @@ impl NetworkWorker {
         );
 
         let transport = {
-            let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
+            let dh_keys = NoiseKeypair::<X25519Spec>::new()
                 .into_authentic(&keypair)
                 .expect("Noise key generation failed");
 
@@ -119,7 +128,7 @@ impl NetworkWorker {
                     }
                 }
             };
-            Swarm::new(transport, behaviour, local_peer_id)
+            SwarmBuilder::with_async_std_executor(transport, behaviour, local_peer_id).build()
         };
 
         // Listen on the addresses.
@@ -138,6 +147,7 @@ impl NetworkWorker {
             local_peer_id,
             network_service: swarm,
             from_service,
+            sessions: SessionManager::default(),
             service: Arc::new(service),
         };
 
@@ -157,6 +167,7 @@ impl NetworkWorker {
             warn!("Failed to bootstrap with Kademlia: {}", e);
         }
 
+        let mut sessions = self.sessions;
         let mut swarm_stream = self.network_service.fuse();
         let mut network_stream = self.from_service.fuse();
 
@@ -165,8 +176,22 @@ impl NetworkWorker {
                 swarm_event = swarm_stream.next() => match swarm_event {
                     // Outbound events
                     Some(event) => match event {
-                        SwarmEvent::Behaviour(BehaviourOut::InboundRequest{peer, protocol, result}) => {
-                            info!("Inbound message from {:?} related to {:?} protocol result {:?}", peer, protocol, result);
+                        SwarmEvent::Behaviour(behaviour_event) => match behaviour_event {
+                            BehaviourEvent::InboundRequest { peer, protocol, result } => {
+                                info!("Inbound message from {:?} related to {:?} protocol result {:?}", peer, protocol, result);
+                            }
+                            BehaviourEvent::RequestResponse(request_responses::Event::RequestFinished { peer, protocol, duration, result }) => {
+                                debug!(
+                                    "broadcast for protocol {:?} finished with {:?} peer: {:?} took: {:?}",
+                                    protocol.to_string(),
+                                    result,
+                                    peer,
+                                    duration
+                                );
+                            }
+                            BehaviourEvent::Identify(event) => Behaviour::on_identify_event(&event),
+                            BehaviourEvent::Ping(event) => Behaviour::on_ping_event(&event),
+                            BehaviourEvent::Discovery(_) | BehaviourEvent::RequestResponse(_) => {}
                         },
                         SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {:?}", address),
                         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
@@ -183,6 +208,10 @@ impl NetworkWorker {
                         let behaviour = swarm_stream.get_mut().behaviour_mut();
 
                         match request {
+                            ServicetoWorkerMsg::OpenRoom { room_id, max_size, respond_to } => {
+                                let result = sessions.claim_or_create(behaviour, room_id, max_size);
+                                let _ = respond_to.send(result);
+                            }
                             ServicetoWorkerMsg::Request {
                                 room_id,
                                 context,
@@ -190,7 +219,7 @@ impl NetworkWorker {
                             } => {
                                 match message {
                                     MessageIntent::Broadcast(payload, response_sender) => {
-                                        let peers: Vec<_> = behaviour.peers(room_id).collect();
+                                        let peers: Vec<_> = swarm_stream.get_mut().connected_peers().cloned().collect();
                                         println!("NetworkService: Broadcasting to {} peers in room {:?}", peers.len(), room_id);
                                         for peer in &peers {
                                             println!("NetworkService: Sending to peer {}", peer);
@@ -236,6 +265,24 @@ impl NetworkWorker {
 }
 
 impl NetworkService {
+    pub async fn open_room(
+        &self,
+        room_id: RoomId,
+        max_size: usize,
+    ) -> Result<mpsc::Receiver<request_responses::IncomingRequest>, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.to_worker
+            .send(ServicetoWorkerMsg::OpenRoom {
+                room_id,
+                max_size,
+                respond_to: tx,
+            })
+            .await
+            .expect("expected worker worker channel to not be full");
+
+        rx.await.map_err(|_| SessionError::ChannelClosed)??
+    }
+
     pub async fn broadcast_message(
         &self,
         room_id: &RoomId,

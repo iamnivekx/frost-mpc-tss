@@ -51,7 +51,21 @@ tracing-error = { version = "0.2.0" }
 tracing-otel-extra = { version = "0.31.0", features = ["logger", "env"] }
 
 # Networking
-libp2p = { version = "0.40.0" }
+libp2p = { version = "0.54.1", default-features = false, features = [
+    "async-std",
+    "dns",
+    "identify",
+    "macros",
+    "mdns",
+    "mplex",
+    "noise",
+    "ping",
+    "request-response",
+    "tcp",
+    "yamux",
+] }
+libp2p-identity = { version = "0.2.9" }
+libp2p-kad = { version = "0.46.2", default-features = false }
 unsigned-varint = { version = "0.8.0" }
 
 # Serialization

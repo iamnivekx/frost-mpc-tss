@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use async_std::task;
 use clap::Parser;
-use mpc_network::{Curve, NetworkWorker, NodeKeyConfig, Params, RoomConfig, Secret};
+use mpc_network::{Curve, NetworkWorker, NodeKeyConfig, Params, RoomId, Secret};
 use mpc_rpc::Tss;
 use mpc_rpc_api::server::JsonRPCServer;
 use mpc_runtime::{new_worker_and_service, LocalStorage};
@@ -45,22 +45,22 @@ impl Command {
 
         let boot_nodes: Vec<_> = config.boot_nodes.iter().map(|p| p.clone()).collect();
 
-        let (room_id, room_cfg, room_rx) = RoomConfig::new_full(
-            "tss/0".to_string(),
-            boot_nodes.clone().into_iter(),
-            config.boot_nodes.len(),
-        );
-
         let params = Params {
             listen_address: local_party.network_peer.multiaddr.clone(),
-            rooms: vec![room_cfg],
             mdns: self.mdns,
             kademlia: self.kademlia,
-            boot_nodes: boot_nodes.clone().into_iter().collect(),
+            rooms: Vec::new(),
+            boot_nodes: boot_nodes.clone(),
         };
 
         let net_worker = NetworkWorker::new(node_key, params)?;
         let net_service = net_worker.service().clone();
+
+        let room_id = RoomId::from("tss/0".to_string());
+        let room_rx = net_service
+            .open_room(room_id.clone(), config.boot_nodes.len())
+            .await
+            .map_err(|e| anyhow!("failed to create room: {e:?}"))?;
 
         let net_task = task::spawn(async {
             net_worker.run().await;

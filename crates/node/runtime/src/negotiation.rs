@@ -38,6 +38,8 @@ struct NegotiationState {
     responses: Option<mpsc::Receiver<Result<(PeerId, Vec<u8>), request_responses::RequestFailure>>>,
     pending_futures: FuturesOrdered<Pin<Box<dyn Future<Output = ()> + Send>>>,
     pending_response: oneshot::Sender<anyhow::Result<Vec<u8>>>,
+    last_broadcast_time: Option<std::time::Instant>,
+    retry_count: u32,
 }
 
 impl NegotiationChannel {
@@ -64,6 +66,8 @@ impl NegotiationChannel {
                 responses: None,
                 pending_futures: Default::default(),
                 pending_response,
+                last_broadcast_time: None,
+                retry_count: 0,
             }),
         }
     }
@@ -82,6 +86,8 @@ impl Future for NegotiationChannel {
             mut responses,
             mut pending_futures,
             pending_response,
+            mut last_broadcast_time,
+            mut retry_count,
         } = self.state.take().unwrap();
 
         loop {
@@ -152,29 +158,45 @@ impl Future for NegotiationChannel {
             }
         } else {
             let agent = self.agent.as_ref().unwrap();
-            println!(
-                "Negotiation: Starting negotiation for room {:?}, need {} peers (already have {})",
-                id,
-                n,
-                peers.len()
-            );
-            let (tx, rx) = mpsc::channel((n - 1) as usize);
-            pending_futures.push_back(
-                service
-                    .clone()
-                    .broadcast_message_owned(
-                        id.clone(),
-                        MessageContext {
-                            message_type: MessageType::Coordination,
-                            protocol_id: agent.protocol_id(),
-                        },
-                        vec![],
-                        Some(tx),
-                    )
-                    .boxed(),
-            );
-            let _ = responses.insert(rx);
-            println!("Negotiation: Broadcast message sent, waiting for responses");
+            let should_broadcast = match last_broadcast_time {
+                None => true, // First time, always broadcast
+                Some(last_time) => {
+                    // Retry if it's been more than 1 second and we don't have enough peers (more aggressive retry)
+                    let elapsed = last_time.elapsed();
+                    elapsed >= Duration::from_secs(1) && peers.len() < n as usize
+                }
+            };
+
+            if should_broadcast {
+                println!(
+                    "Negotiation: Starting negotiation for room {:?}, need {} peers (already have {})",
+                    id,
+                    n,
+                    peers.len()
+                );
+                let (tx, rx) = mpsc::channel((n - 1) as usize);
+                pending_futures.push_back(
+                    service
+                        .clone()
+                        .broadcast_message_owned(
+                            id.clone(),
+                            MessageContext {
+                                message_type: MessageType::Coordination,
+                                protocol_id: agent.protocol_id(),
+                            },
+                            vec![],
+                            Some(tx),
+                        )
+                        .boxed(),
+                );
+                let _ = responses.insert(rx);
+                last_broadcast_time = Some(std::time::Instant::now());
+                retry_count += 1;
+                println!(
+                    "Negotiation: Broadcast message sent (retry #{}), waiting for responses",
+                    retry_count
+                );
+            }
         }
 
         // It took too long for peerset to be assembled  - reset to Phase 1.
@@ -202,6 +224,8 @@ impl Future for NegotiationChannel {
             responses,
             pending_futures,
             pending_response,
+            last_broadcast_time,
+            retry_count,
         });
 
         // Wake this task to be polled again.

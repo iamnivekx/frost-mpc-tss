@@ -105,39 +105,85 @@ impl NodeKeyConfig {
         use NodeKeyConfig::*;
         match self {
             Ed25519(Secret::New) => Ok(Keypair::generate_ed25519()),
-            Ed25519(Secret::Input(k)) => Ok(Keypair::Ed25519(k.into())),
-            Ed25519(Secret::File(f)) => get_secret(
-                f,
-                |mut b| match String::from_utf8(b.to_vec()).ok().and_then(|s| {
-                    if s.len() == 64 {
-                        hex::decode(&s).ok()
-                    } else {
-                        None
+            Ed25519(Secret::Input(k)) => {
+                let kp = ed25519::Keypair::from(k);
+                Ok(Keypair::from(kp))
+            }
+            Ed25519(Secret::File(f)) => {
+                // Try to read existing key
+                match fs::read(&f) {
+                    Ok(mut bytes) => {
+                        // Try to parse as hex string first
+                        let sk_result = String::from_utf8(bytes.clone())
+                            .ok()
+                            .and_then(|s| {
+                                if s.len() == 64 {
+                                    hex::decode(&s).ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .and_then(|decoded| {
+                                // try_from_bytes expects AsMut<[u8]>
+                                if decoded.len() == 32 {
+                                    let mut array = [0u8; 32];
+                                    array.copy_from_slice(&decoded);
+                                    ed25519::SecretKey::try_from_bytes(&mut array).ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .or_else(|| {
+                                // Try parsing as raw bytes
+                                if bytes.len() == 32 {
+                                    ed25519::SecretKey::try_from_bytes(&mut bytes).ok()
+                                } else {
+                                    None
+                                }
+                            });
+
+                        if let Some(sk) = sk_result {
+                            let kp = ed25519::Keypair::from(sk);
+                            return Ok(Keypair::from(kp));
+                        }
                     }
-                }) {
-                    Some(s) => ed25519::SecretKey::from_bytes(s),
-                    _ => ed25519::SecretKey::from_bytes(&mut b),
-                },
-                ed25519::SecretKey::generate,
-                |b| b.as_ref().to_vec(),
-            )
-            .map(ed25519::Keypair::from)
-            .map(Keypair::Ed25519),
+                    Err(_) => {}
+                }
+
+                // Generate new key and save it
+                let sk = ed25519::SecretKey::generate();
+                let kp = ed25519::Keypair::from(sk);
+                let keypair = Keypair::from(kp);
+
+                // Save the key (clone before moving)
+                let keypair_clone = keypair.clone();
+                let ed25519_kp = keypair_clone.try_into_ed25519().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "failed to convert to ed25519")
+                })?;
+                let sk_ref = ed25519_kp.secret();
+                let sk_slice: &[u8] = sk_ref.as_ref();
+                let mut sk_bytes = [0u8; 32];
+                sk_bytes.copy_from_slice(sk_slice);
+                write_secret_file(&f, &sk_bytes)?;
+
+                Ok(keypair)
+            }
         }
     }
 
     pub fn persist<P: AsRef<Path>>(k: Keypair, path: P) -> io::Result<()> {
-        match k {
-            Keypair::Ed25519(k) => {
-                let sk = ed25519::SecretKey::from(k);
-                let mut sk_vec = sk.as_ref().to_vec();
-                write_secret_file(path, &sk_vec)?;
-                sk_vec.zeroize();
-                Ok(())
-            }
-            _ => {
-                panic!("unsupported curve");
-            }
+        if let Ok(ed25519_kp) = k.try_into_ed25519() {
+            let sk = ed25519_kp.secret();
+            let sk_bytes = sk.as_ref();
+            let mut sk_vec = sk_bytes.to_vec();
+            write_secret_file(path, &sk_vec)?;
+            sk_vec.zeroize();
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported curve",
+            ))
         }
     }
 }
@@ -224,9 +270,7 @@ pub fn parse_str_addr(addr_str: &str) -> Result<(PeerId, Multiaddr), anyhow::Err
 /// Splits a Multiaddress into a Multiaddress and PeerId.
 pub fn parse_addr(mut addr: Multiaddr) -> Result<(PeerId, Multiaddr), anyhow::Error> {
     let who = match addr.pop() {
-        Some(multiaddr::Protocol::P2p(key)) => {
-            PeerId::from_multihash(key).map_err(|_| anyhow!("invalid peer id"))?
-        }
+        Some(multiaddr::Protocol::P2p(key)) => PeerId::from(key),
         _ => return Err(anyhow!("peer id missing")),
     };
 

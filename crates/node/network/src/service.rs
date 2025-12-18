@@ -1,5 +1,6 @@
 use crate::{
     behaviour::{Behaviour, BehaviourOut},
+    config::MultiaddrWithPeerId,
     error::Error,
     request_responses,
     request_responses::IfDisconnected,
@@ -8,14 +9,15 @@ use crate::{
     NodeKeyConfig, RoomId,
 };
 use async_std::channel::{unbounded, Receiver, Sender};
+use async_std::stream;
 use futures::channel::mpsc;
 use futures::select;
 use futures_util::stream::StreamExt;
 use libp2p::core::transport::upgrade;
-use libp2p::noise::NoiseConfig;
+use libp2p::noise;
 use libp2p::swarm::SwarmEvent;
-use libp2p::tcp::TcpConfig;
-use libp2p::{mplex, noise, PeerId, Swarm, Transport};
+use libp2p::{tcp, yamux, PeerId, Swarm, Transport};
+use std::time::Duration;
 use std::{borrow::Cow, sync::Arc};
 use tracing::{debug, info, warn};
 
@@ -66,8 +68,8 @@ pub struct NetworkWorker {
     network_service: Swarm<Behaviour>,
     /// Messages from the [`NetworkService`] that must be processed.
     from_service: Receiver<ServicetoWorkerMsg>,
-    // / The `PeerId`'s of all boot nodes.
-    // boot_node_ids: Arc<HashSet<PeerId>>,
+    /// The boot nodes to connect to.
+    boot_nodes: Vec<MultiaddrWithPeerId>,
 }
 
 #[derive(Clone)]
@@ -81,22 +83,20 @@ pub struct NetworkService {
 impl NetworkWorker {
     pub fn new(node_key: NodeKeyConfig, params: crate::Params) -> Result<Self, Error> {
         let keypair = node_key.into_keypair().map_err(|e| Error::Io(e))?;
-        let local_peer_id = PeerId::from(keypair.public());
+        let local_peer_id = keypair.public().to_peer_id();
         info!(
             target: "sub-libp2p",
             "🏷 Local node identity is: {}",
-            local_peer_id.to_base58(),
+            local_peer_id.to_string(),
         );
 
         let transport = {
-            let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
-                .into_authentic(&keypair)
-                .expect("Noise key generation failed");
+            let noise_config = noise::Config::new(&keypair).expect("Noise key generation failed");
 
-            TcpConfig::new()
+            tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
                 .upgrade(upgrade::Version::V1)
-                .authenticate(NoiseConfig::xx(dh_keys).into_authenticated())
-                .multiplex(mplex::MplexConfig::new())
+                .authenticate(noise_config)
+                .multiplex(yamux::Config::default())
                 .boxed()
         };
 
@@ -119,7 +119,9 @@ impl NetworkWorker {
                     }
                 }
             };
-            Swarm::new(transport, behaviour, local_peer_id)
+            let config = libp2p::swarm::Config::with_tokio_executor()
+                .with_idle_connection_timeout(std::time::Duration::from_secs(60));
+            Swarm::new(transport, behaviour, local_peer_id, config)
         };
 
         // Listen on the addresses.
@@ -139,6 +141,7 @@ impl NetworkWorker {
             network_service: swarm,
             from_service,
             service: Arc::new(service),
+            boot_nodes: params.boot_nodes,
         };
 
         Ok(worker)
@@ -152,25 +155,81 @@ impl NetworkWorker {
 
     /// Starts the libp2p service networking stack.
     pub async fn run(mut self) {
-        // Bootstrap with Kademlia
+        // Dial boot nodes to establish initial connections
+        for boot_node in &self.boot_nodes {
+            let peer_id = boot_node.peer_id;
+            let addr = boot_node.concat();
+            info!(target: "sub-libp2p", "Dialing boot node {} at {}", peer_id, addr);
+            match self.network_service.dial(addr) {
+                Ok(()) => {
+                    debug!(target: "sub-libp2p", "Successfully initiated dial to boot node {}", peer_id);
+                }
+                Err(e) => {
+                    warn!(target: "sub-libp2p", "Failed to dial boot node {}: {:?}", peer_id, e);
+                }
+            }
+        }
+
+        // Bootstrap with Kademlia (after dialing boot nodes)
         if let Err(e) = self.network_service.behaviour_mut().bootstrap() {
             warn!("Failed to bootstrap with Kademlia: {}", e);
         }
 
         let mut swarm_stream = self.network_service.fuse();
         let mut network_stream = self.from_service.fuse();
+        let mut retry_interval = stream::interval(Duration::from_secs(1)).fuse(); // Retry dialing boot nodes every 1 second for faster connection
+        let mut connected_boot_nodes = std::collections::HashSet::new();
 
         loop {
             select! {
+                _ = retry_interval.next() => {
+                    // Periodically retry dialing boot nodes that aren't connected yet
+                    for boot_node in &self.boot_nodes {
+                        if !connected_boot_nodes.contains(&boot_node.peer_id) {
+                            let peer_id = boot_node.peer_id;
+                            let addr = boot_node.concat();
+                            debug!(target: "sub-libp2p", "Retrying dial to boot node {} at {}", peer_id, addr);
+                            match swarm_stream.get_mut().dial(addr) {
+                                Ok(()) => {
+                                    debug!(target: "sub-libp2p", "Successfully initiated retry dial to boot node {}", peer_id);
+                                }
+                                Err(e) => {
+                                    debug!(target: "sub-libp2p", "Retry dial to boot node {} failed: {:?}", peer_id, e);
+                                }
+                            }
+                        }
+                    }
+                }
                 swarm_event = swarm_stream.next() => match swarm_event {
                     // Outbound events
                     Some(event) => match event {
-                        SwarmEvent::Behaviour(BehaviourOut::InboundRequest{peer, protocol, result}) => {
-                            info!("Inbound message from {:?} related to {:?} protocol result {:?}", peer, protocol, result);
+                        SwarmEvent::Behaviour(BehaviourOut::RequestResponse(ev)) => {
+                            match ev {
+                                request_responses::Event::InboundRequest { peer, protocol, result } => {
+                                    info!("Inbound message from {:?} related to {:?} protocol result {:?}", peer, protocol, result);
+                                }
+                                request_responses::Event::RequestFinished { peer, protocol, duration, result } => {
+                                    debug!(
+                                        "Request finished: protocol {:?} peer {:?} took {:?} result {:?}",
+                                        protocol,
+                                        peer,
+                                        duration,
+                                        result
+                                    );
+                                }
+                            }
                         },
+                        SwarmEvent::Behaviour(BehaviourOut::Discovery(_)) => {}
+                        SwarmEvent::Behaviour(BehaviourOut::Identify(_)) => {}
+                        SwarmEvent::Behaviour(BehaviourOut::Ping(_)) => {}
                         SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {:?}", address),
                         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                            debug!(target: "sub-libp2p", "Libp2p => Connected({:?})", peer_id);
+                            info!(target: "sub-libp2p", "Libp2p => Connected({:?})", peer_id);
+                            // Mark boot node as connected if it's in our boot nodes list
+                            if self.boot_nodes.iter().any(|bn| bn.peer_id == peer_id) {
+                                connected_boot_nodes.insert(peer_id);
+                                debug!(target: "sub-libp2p", "Boot node {} is now connected", peer_id);
+                            }
                         },
                         SwarmEvent::ConnectionClosed { peer_id: _, .. } => { }
                         _ => continue
@@ -192,6 +251,7 @@ impl NetworkWorker {
                                     MessageIntent::Broadcast(payload, response_sender) => {
                                         let peers: Vec<_> = behaviour.peers(room_id).collect();
                                         println!("NetworkService: Broadcasting to {} peers in room {:?}", peers.len(), room_id);
+                                        println!("NetworkService: All known peers at broadcast time: {:?}", peers);
                                         for peer in &peers {
                                             println!("NetworkService: Sending to peer {}", peer);
                                         }

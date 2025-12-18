@@ -219,10 +219,19 @@ impl KeyGen {
                 .recv()
                 .await
                 .map_err(|e| anyhow!("error receiving message: {e}"))?;
-            let payload: Vec<u8> = serde_ipld_dagcbor::from_slice(&req.payload)
-                .map_err(|e| anyhow!("failed to decode round1 package: {e}"))?;
-            let round1_pkg = round1::Package::<C>::deserialize(&payload)
-                .map_err(|e| anyhow!("failed to deserialize round1 package: {e}"))?;
+
+            let payload: Vec<u8> = serde_ipld_dagcbor::from_slice(&req.payload).map_err(|e| {
+                anyhow!(
+                    "failed to decode round1 package (payload size: {}): {e}",
+                    req.payload.len()
+                )
+            })?;
+            let round1_pkg = round1::Package::<C>::deserialize(&payload).map_err(|e| {
+                anyhow!(
+                    "failed to deserialize round1 package (decoded payload size: {}): {e}",
+                    payload.len()
+                )
+            })?;
             let sender_id = Identifier::try_from(req.from)
                 .map_err(|e| anyhow!("invalid sender identifier: {e}"))?;
 

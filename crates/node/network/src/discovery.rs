@@ -1,24 +1,26 @@
 use crate::Params;
 use async_std::task;
 use libp2p::{
-    core::{
-        connection::{ConnectionId, ListenerId},
-        ConnectedPoint, Multiaddr, PeerId, PublicKey,
+    core::{transport::PortUse, Endpoint, Multiaddr},
+    identity::PublicKey,
+    kad::{
+        store::{MemoryStore, MemoryStoreConfig},
+        Behaviour as Kademlia, Config as KademliaConfig, Event as KademliaEvent, QueryId,
     },
-    kad::{handler::KademliaHandlerProto, Kademlia, KademliaConfig, KademliaEvent, QueryId},
-    mdns::MdnsEvent,
-    swarm::DialError,
+    mdns::{self, tokio::Behaviour as TokioMdns},
     swarm::{
-        toggle::{Toggle, ToggleIntoProtoHandler},
-        IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
-        ProtocolsHandler,
+        behaviour::{
+            toggle::{Toggle, ToggleConnectionHandler},
+            ConnectionClosed, ConnectionEstablished, FromSwarm,
+        },
+        ConnectionDenied, ConnectionId, NetworkBehaviour, THandler, THandlerInEvent,
+        THandlerOutEvent, ToSwarm,
     },
+    PeerId,
 };
-use libp2p::{kad::record::store::MemoryStore, mdns::Mdns};
 use std::collections::HashMap;
 use std::{
     collections::{HashSet, VecDeque},
-    io,
     task::{Context, Poll},
 };
 use tracing::{debug, error, trace, warn};
@@ -44,7 +46,7 @@ pub struct DiscoveryBehaviour {
     /// Kademlia discovery.
     kademlia: Toggle<Kademlia<MemoryStore>>,
     /// Discovers nodes on the local network.
-    mdns: Toggle<Mdns>,
+    mdns: Toggle<TokioMdns>,
     /// Events to return in priority when polled.
     pending_events: VecDeque<DiscoveryOut>,
     /// Number of nodes we're currently connected to.
@@ -68,12 +70,13 @@ impl DiscoveryBehaviour {
             .collect();
 
         let kademlia_opt = {
-            // Kademlia config
-            let store = MemoryStore::new(local_peer_id.to_owned());
-            let kad_config = KademliaConfig::default();
-
             if params.kademlia {
+                // Create a protocol name for Kademlia
+                let protocol = libp2p::swarm::StreamProtocol::new("/ipfs/kad/1.0.0");
+                let kad_config = KademliaConfig::new(protocol);
+                let store = MemoryStore::with_config(local_peer_id, MemoryStoreConfig::default());
                 let mut kademlia = Kademlia::with_config(local_peer_id, store, kad_config);
+                kademlia.set_mode(Some(libp2p::kad::Mode::Server));
                 for (peer_id, addr) in permanent_addresses.iter() {
                     kademlia.add_address(peer_id, addr.clone());
                     peers.insert(*peer_id);
@@ -88,11 +91,13 @@ impl DiscoveryBehaviour {
         };
 
         let mdns_opt = if params.mdns {
-            Some(task::block_on(async {
-                Mdns::new(Default::default())
-                    .await
-                    .expect("Could not start mDNS")
-            }))
+            match TokioMdns::new(libp2p::mdns::Config::default(), local_peer_id) {
+                Ok(mdns) => Some(mdns),
+                Err(err) => {
+                    warn!("Failed to initialize mDNS: {:?}", err);
+                    None
+                }
+            }
         } else {
             None
         };
@@ -129,135 +134,218 @@ impl DiscoveryBehaviour {
 }
 
 impl NetworkBehaviour for DiscoveryBehaviour {
-    type ProtocolsHandler = ToggleIntoProtoHandler<KademliaHandlerProto<QueryId>>;
-    type OutEvent = DiscoveryOut;
+    type ConnectionHandler =
+        ToggleConnectionHandler<<Kademlia<MemoryStore> as NetworkBehaviour>::ConnectionHandler>;
+    type ToSwarm = DiscoveryOut;
 
-    fn new_handler(&mut self) -> Self::ProtocolsHandler {
-        self.kademlia.new_handler()
+    fn handle_established_inbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        peer: PeerId,
+        local_addr: &Multiaddr,
+        remote_addr: &Multiaddr,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        self.kademlia.handle_established_inbound_connection(
+            connection_id,
+            peer,
+            local_addr,
+            remote_addr,
+        )
     }
 
-    fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
+    fn handle_established_outbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        peer: PeerId,
+        addr: &Multiaddr,
+        role_override: Endpoint,
+        port_use: PortUse,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        self.kademlia.handle_established_outbound_connection(
+            connection_id,
+            peer,
+            addr,
+            role_override,
+            port_use,
+        )
+    }
+
+    fn handle_pending_inbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        local_addr: &Multiaddr,
+        remote_addr: &Multiaddr,
+    ) -> Result<(), ConnectionDenied> {
+        self.kademlia
+            .handle_pending_inbound_connection(connection_id, local_addr, remote_addr)
+    }
+
+    fn handle_pending_outbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        maybe_peer: Option<PeerId>,
+        addresses: &[Multiaddr],
+        effective_role: Endpoint,
+    ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
         let mut list = self
             .permanent_addresses
             .iter()
-            .filter_map(|(p, a)| if p == peer_id { Some(a.clone()) } else { None })
+            .filter_map(|(p, a)| (*p == maybe_peer?).then(|| a.clone()))
             .collect::<Vec<_>>();
 
-        {
-            let mut list_to_filter = Vec::new();
-            if let Some(k) = self.kademlia.as_mut() {
-                list_to_filter.extend(k.addresses_of_peer(peer_id))
-            }
+        if let Some(peer_id) = maybe_peer {
+            let mut list_to_filter = self.kademlia.handle_pending_outbound_connection(
+                connection_id,
+                maybe_peer,
+                addresses,
+                effective_role,
+            )?;
 
-            list_to_filter.extend(self.mdns.addresses_of_peer(peer_id));
+            list_to_filter.extend(self.mdns.handle_pending_outbound_connection(
+                connection_id,
+                maybe_peer,
+                addresses,
+                effective_role,
+            )?);
 
             list.extend(list_to_filter);
         }
 
-        trace!("Addresses of {:?}: {:?}", peer_id, list);
-
-        list
+        trace!("Addresses of {:?}: {:?}", maybe_peer, list);
+        Ok(list)
     }
 
-    fn inject_connected(&mut self, peer_id: &PeerId) {
-        let multiaddr = self.addresses_of_peer(peer_id);
-        self.peer_addresses.insert(*peer_id, multiaddr);
-        self.peers.insert(*peer_id);
-        self.pending_events
-            .push_back(DiscoveryOut::Connected(*peer_id));
-
-        self.kademlia.inject_connected(peer_id)
-    }
-
-    fn inject_disconnected(&mut self, peer_id: &PeerId) {
-        self.pending_events
-            .push_back(DiscoveryOut::Disconnected(*peer_id));
-
-        self.kademlia.inject_disconnected(peer_id)
-    }
-
-    fn inject_connection_established(
-        &mut self,
-        peer_id: &PeerId,
-        conn: &ConnectionId,
-        endpoint: &ConnectedPoint,
-        failed_addresses: Option<&Vec<Multiaddr>>,
-    ) {
-        self.num_connections += 1;
-
-        self.kademlia
-            .inject_connection_established(peer_id, conn, endpoint, failed_addresses)
-    }
-
-    fn inject_connection_closed(
-        &mut self,
-        peer_id: &PeerId,
-        conn: &ConnectionId,
-        endpoint: &ConnectedPoint,
-        handler: <Self::ProtocolsHandler as IntoProtocolsHandler>::Handler,
-    ) {
-        self.num_connections -= 1;
-
-        self.kademlia
-            .inject_connection_closed(peer_id, conn, endpoint, handler)
-    }
-
-    fn inject_event(
-        &mut self,
-        peer_id: PeerId,
-        connection: ConnectionId,
-        event: <<Self::ProtocolsHandler as IntoProtocolsHandler>::Handler as ProtocolsHandler>::OutEvent,
-    ) {
-        if let Some(kad) = self.kademlia.as_mut() {
-            return kad.inject_event(peer_id, connection, event);
+    fn on_swarm_event(&mut self, event: FromSwarm) {
+        match event {
+            FromSwarm::ConnectionEstablished(ConnectionEstablished {
+                peer_id,
+                endpoint,
+                connection_id,
+                ..
+            }) => {
+                self.num_connections += 1;
+                let multiaddrs: Vec<Multiaddr> = self
+                    .permanent_addresses
+                    .iter()
+                    .filter(|(p, _)| *p == peer_id)
+                    .map(|(_, a)| a.clone())
+                    .collect();
+                if !multiaddrs.is_empty() {
+                    self.peer_addresses.insert(peer_id, multiaddrs.clone());
+                }
+                // Kademlia addresses are handled separately, we don't need to merge them here
+                self.peers.insert(peer_id);
+                println!(
+                    "DiscoveryBehaviour: Added peer {} to peers set. Current peers count: {}",
+                    peer_id,
+                    self.peers.len()
+                );
+                self.pending_events
+                    .push_back(DiscoveryOut::Connected(peer_id));
+                // Forward the ConnectionEstablished event to kademlia
+                // We need to reconstruct it from the received event
+                // Forward the ConnectionEstablished event to kademlia
+                // FromSwarm events can be forwarded directly
+                self.kademlia
+                    .on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+                        peer_id,
+                        endpoint: &endpoint,
+                        connection_id,
+                        failed_addresses: &[],
+                        other_established: 0,
+                    }));
+            }
+            FromSwarm::ConnectionClosed(ConnectionClosed {
+                peer_id,
+                connection_id,
+                endpoint,
+                remaining_established,
+                cause,
+            }) => {
+                println!("DiscoveryBehaviour: ConnectionClosed for peer {}, remaining_established: {}, cause: {:?}", peer_id, remaining_established, cause);
+                if remaining_established == 0 {
+                    self.peers.remove(&peer_id);
+                    self.peer_addresses.remove(&peer_id);
+                    println!("DiscoveryBehaviour: Removed peer {} from peers set. Current peers count: {}", peer_id, self.peers.len());
+                    self.pending_events
+                        .push_back(DiscoveryOut::Disconnected(peer_id));
+                } else {
+                    println!("DiscoveryBehaviour: Connection closed but remaining_established > 0, keeping peer {} in set", peer_id);
+                }
+                self.num_connections -= 1;
+                self.kademlia
+                    .on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+                        peer_id,
+                        connection_id,
+                        endpoint,
+                        remaining_established,
+                        cause,
+                    }));
+            }
+            FromSwarm::DialFailure(e) => {
+                self.kademlia.on_swarm_event(FromSwarm::DialFailure(e));
+            }
+            FromSwarm::ListenerClosed(e) => {
+                self.kademlia.on_swarm_event(FromSwarm::ListenerClosed(e));
+            }
+            FromSwarm::ListenFailure(e) => {
+                self.kademlia.on_swarm_event(FromSwarm::ListenFailure(e));
+            }
+            FromSwarm::ListenerError(e) => {
+                self.kademlia.on_swarm_event(FromSwarm::ListenerError(e));
+            }
+            FromSwarm::ExternalAddrExpired(e) => {
+                self.kademlia
+                    .on_swarm_event(FromSwarm::ExternalAddrExpired(e));
+            }
+            FromSwarm::NewListener(e) => {
+                self.kademlia.on_swarm_event(FromSwarm::NewListener(e));
+            }
+            FromSwarm::ExpiredListenAddr(e) => {
+                self.kademlia
+                    .on_swarm_event(FromSwarm::ExpiredListenAddr(e));
+            }
+            FromSwarm::NewExternalAddrCandidate(e) => {
+                self.kademlia
+                    .on_swarm_event(FromSwarm::NewExternalAddrCandidate(e));
+            }
+            FromSwarm::AddressChange(e) => {
+                self.kademlia.on_swarm_event(FromSwarm::AddressChange(e));
+            }
+            FromSwarm::NewListenAddr(e) => {
+                self.kademlia.on_swarm_event(FromSwarm::NewListenAddr(e));
+                self.mdns.on_swarm_event(FromSwarm::NewListenAddr(e));
+            }
+            FromSwarm::ExternalAddrConfirmed(e) => {
+                self.kademlia
+                    .on_swarm_event(FromSwarm::ExternalAddrConfirmed(e));
+            }
+            FromSwarm::NewExternalAddrOfPeer(e) => {
+                self.kademlia
+                    .on_swarm_event(FromSwarm::NewExternalAddrOfPeer(e));
+                self.mdns
+                    .on_swarm_event(FromSwarm::NewExternalAddrOfPeer(e));
+            }
+            _ => {
+                self.kademlia.on_swarm_event(event);
+                self.mdns.on_swarm_event(event);
+            }
         }
-        error!("inject_node_event: no kademlia instance registered for protocol")
     }
 
-    fn inject_dial_failure(
-        &mut self,
-        peer_id: Option<PeerId>,
-        handler: Self::ProtocolsHandler,
-        err: &DialError,
-    ) {
-        self.kademlia.inject_dial_failure(peer_id, handler, err)
-    }
-
-    fn inject_new_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
-        self.kademlia.inject_new_listen_addr(id, addr)
-    }
-
-    fn inject_expired_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
-        self.kademlia.inject_expired_listen_addr(id, addr);
-    }
-
-    fn inject_listener_error(&mut self, id: ListenerId, err: &(dyn std::error::Error + 'static)) {
-        self.kademlia.inject_listener_error(id, err)
-    }
-
-    fn inject_listener_closed(&mut self, id: ListenerId, reason: Result<(), &io::Error>) {
-        self.kademlia.inject_listener_closed(id, reason)
-    }
-
-    fn inject_new_external_addr(&mut self, addr: &Multiaddr) {
-        self.kademlia.inject_new_external_addr(addr)
-    }
-
-    #[allow(clippy::type_complexity)]
     fn poll(
         &mut self,
-        cx: &mut Context,
-        params: &mut impl PollParameters,
-    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
+        cx: &mut Context<'_>,
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         // Immediately process the content of `discovered`.
         if let Some(ev) = self.pending_events.pop_front() {
-            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(ev));
+            return Poll::Ready(ToSwarm::GenerateEvent(ev));
         }
 
         // Poll Kademlia.
-        while let Poll::Ready(ev) = self.kademlia.poll(cx, params) {
-            match ev {
-                NetworkBehaviourAction::GenerateEvent(ev) => match ev {
+        loop {
+            match self.kademlia.poll(cx) {
+                Poll::Ready(ToSwarm::GenerateEvent(ev)) => match ev {
                     KademliaEvent::RoutingUpdated { .. } => {}
                     KademliaEvent::RoutablePeer { .. } => {}
                     KademliaEvent::PendingRoutablePeer { .. } => {}
@@ -265,92 +353,145 @@ impl NetworkBehaviour for DiscoveryBehaviour {
                         debug!("Kademlia event: {:?}", other)
                     }
                 },
-                NetworkBehaviourAction::DialAddress { address, handler } => {
-                    return Poll::Ready(NetworkBehaviourAction::DialAddress { address, handler })
+                Poll::Ready(other) => {
+                    // Convert ToSwarm<KademliaEvent, ...> to ToSwarm<DiscoveryOut, ...>
+                    match other {
+                        ToSwarm::Dial { opts } => {
+                            return Poll::Ready(ToSwarm::Dial { opts });
+                        }
+                        ToSwarm::CloseConnection {
+                            peer_id,
+                            connection,
+                        } => {
+                            return Poll::Ready(ToSwarm::CloseConnection {
+                                peer_id,
+                                connection,
+                            });
+                        }
+                        ToSwarm::NotifyHandler {
+                            peer_id,
+                            handler,
+                            event: _,
+                        } => {
+                            // mdns doesn't have handler events, so this should not happen
+                            // But we need to handle it to satisfy the type system
+                            // mdns may generate NotifyHandler events in some cases
+                            // Just ignore them and continue polling
+                            continue;
+                        }
+                        // ReportObservedAddr is not a variant of ToSwarm in libp2p 0.54
+                        // It's handled through other mechanisms
+                        ToSwarm::GenerateEvent(_) => {
+                            // This should have been handled above
+                            unreachable!();
+                        }
+                        _ => {
+                            // Handle any other ToSwarm variants
+                            // We need to convert the event type
+                            // Since mdns uses Void for HandlerIn, we can't use map_out
+                            // Instead, we'll just return the event as-is and let the type system handle it
+                            return Poll::Ready(
+                                other
+                                    .map_out(|_| {
+                                        unreachable!("Kademlia should not generate other events")
+                                    })
+                                    .map_in(|_| {
+                                        unreachable!("Kademlia should not generate handler events")
+                                    }),
+                            );
+                        }
+                    }
                 }
-                NetworkBehaviourAction::DialPeer {
-                    peer_id,
-                    condition,
-                    handler,
-                } => {
-                    return Poll::Ready(NetworkBehaviourAction::DialPeer {
-                        peer_id,
-                        condition,
-                        handler,
-                    })
-                }
-                NetworkBehaviourAction::NotifyHandler {
-                    peer_id,
-                    handler,
-                    event,
-                } => {
-                    return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
-                        peer_id,
-                        handler,
-                        event,
-                    })
-                }
-                NetworkBehaviourAction::ReportObservedAddr { address, score } => {
-                    return Poll::Ready(NetworkBehaviourAction::ReportObservedAddr {
-                        address,
-                        score,
-                    })
-                }
-                NetworkBehaviourAction::CloseConnection {
-                    peer_id,
-                    connection,
-                } => {
-                    return Poll::Ready(NetworkBehaviourAction::CloseConnection {
-                        peer_id,
-                        connection,
-                    })
-                }
+                Poll::Pending => break,
             }
         }
 
         // Poll mdns.
-        while let Poll::Ready(ev) = self.mdns.poll(cx, params) {
-            match ev {
-                NetworkBehaviourAction::GenerateEvent(event) => match event {
-                    MdnsEvent::Discovered(list) => {
-                        // Add any discovered peers to Kademlia
-                        for (peer_id, multiaddr) in list {
-                            if let Some(kad) = self.kademlia.as_mut() {
-                                kad.add_address(&peer_id, multiaddr);
+        loop {
+            match self.mdns.poll(cx) {
+                Poll::Ready(ToSwarm::GenerateEvent(event)) => {
+                    match event {
+                        mdns::Event::Discovered(list) => {
+                            // Add any discovered peers to Kademlia
+                            for (peer_id, multiaddr) in list {
+                                if let Some(kad) = self.kademlia.as_mut() {
+                                    kad.add_address(&peer_id, multiaddr);
+                                }
                             }
                         }
+                        mdns::Event::Expired(_) => {}
                     }
-                    MdnsEvent::Expired(_) => {}
-                },
-                NetworkBehaviourAction::DialAddress { .. } => {}
-                NetworkBehaviourAction::DialPeer { .. } => {}
-                // Nothing to notify handler
-                NetworkBehaviourAction::NotifyHandler { event, .. } => match event {
-                    _ => {}
-                },
-                NetworkBehaviourAction::ReportObservedAddr { address, score } => {
-                    return Poll::Ready(NetworkBehaviourAction::ReportObservedAddr {
-                        address,
-                        score,
-                    })
+                    // Continue polling
                 }
-                NetworkBehaviourAction::CloseConnection {
-                    peer_id,
-                    connection,
-                } => {
-                    return Poll::Ready(NetworkBehaviourAction::CloseConnection {
-                        peer_id,
-                        connection,
-                    })
+                Poll::Ready(other) => {
+                    // Convert ToSwarm<mdns::Event, ...> to ToSwarm<DiscoveryOut, ...>
+                    match other {
+                        ToSwarm::Dial { opts } => {
+                            return Poll::Ready(ToSwarm::Dial { opts });
+                        }
+                        ToSwarm::CloseConnection {
+                            peer_id,
+                            connection,
+                        } => {
+                            return Poll::Ready(ToSwarm::CloseConnection {
+                                peer_id,
+                                connection,
+                            });
+                        }
+                        ToSwarm::NotifyHandler {
+                            peer_id,
+                            handler,
+                            event: _,
+                        } => {
+                            // mdns doesn't have handler events, so this should not happen
+                            // But we need to handle it to satisfy the type system
+                            // mdns may generate NotifyHandler events in some cases
+                            // Just ignore them and continue polling
+                            continue;
+                        }
+                        // ReportObservedAddr is not a variant of ToSwarm in libp2p 0.54
+                        // It's handled through other mechanisms
+                        ToSwarm::GenerateEvent(_) => {
+                            // This should have been handled above
+                            unreachable!();
+                        }
+                        _ => {
+                            // Handle any other ToSwarm variants
+                            // We need to convert the event type
+                            // Since mdns uses Void for HandlerIn, we can't use map_out
+                            // Instead, we'll just return the event as-is and let the type system handle it
+                            return Poll::Ready(
+                                other
+                                    .map_out(|_| {
+                                        unreachable!("Kademlia should not generate other events")
+                                    })
+                                    .map_in(|_| {
+                                        unreachable!("Kademlia should not generate handler events")
+                                    }),
+                            );
+                        }
+                    }
                 }
+                Poll::Pending => break,
             }
         }
 
         // Poll pending events
         if let Some(ev) = self.pending_events.pop_front() {
-            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(ev));
+            return Poll::Ready(ToSwarm::GenerateEvent(ev));
         }
 
         Poll::Pending
+    }
+
+    fn on_connection_handler_event(
+        &mut self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        event: THandlerOutEvent<Self>,
+    ) {
+        if let Some(kad) = self.kademlia.as_mut() {
+            kad.on_connection_handler_event(peer_id, connection_id, event);
+        }
     }
 }

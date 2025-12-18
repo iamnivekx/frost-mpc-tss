@@ -16,3 +16,6 @@ data
 *.json
 config_peer*.json
 
+# Reference code
+.ref/
+

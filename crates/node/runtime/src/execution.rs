@@ -1,20 +1,24 @@
-use crate::echo::{EchoMessage, EchoResponse};
-use crate::peerset::Peerset;
-use crate::{ComputeAgentAsync, LocalStorage, PeersetMsg, PeersetStorage};
+use crate::{
+    echo::{EchoMessage, EchoResponse},
+    peerset::Peerset,
+    ComputeAgentAsync, LocalStorage, PeersetMsg, PeersetStorage,
+};
 use anyhow::anyhow;
-use async_std::task;
-use futures::channel::{mpsc, oneshot};
-use futures::Stream;
-use futures_util::stream::FuturesOrdered;
-use futures_util::{FutureExt, StreamExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    Stream,
+};
+use futures_util::{stream::FuturesOrdered, FutureExt, StreamExt};
 use libp2p::PeerId;
 use mpc_network::{
     request_responses, request_responses::MessageContext, request_responses::MessageType,
     request_responses::OutgoingResponse, NetworkService, RoomId,
 };
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tracing::{error, info, warn};
 
 pub(crate) struct ProtocolExecution {
@@ -146,7 +150,7 @@ impl Future for ProtocolExecution {
                     );
 
                     // todo: handle in same Future::poll
-                    task::spawn(async move {
+                    tokio::task::spawn(async move {
                         if let Err(e) = res_rx.select_next_some().await {
                             error!("party responded with error: {e}");
                         }

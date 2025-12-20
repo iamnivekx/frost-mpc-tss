@@ -13,7 +13,6 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 async-channel = { workspace = true }
 tokio = { workspace = true }
-async-std = { workspace = true }
 async-trait = { workspace = true }
 
 # Error handling

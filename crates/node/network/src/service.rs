@@ -8,10 +8,8 @@ use crate::{
     request_responses::RequestFailure,
     NodeKeyConfig, RoomId,
 };
-use async_std::channel::{unbounded, Receiver, Sender};
-use async_std::stream;
+use async_channel::{unbounded, Receiver, Sender};
 use futures::channel::mpsc;
-use futures::select;
 use futures_util::stream::StreamExt;
 use libp2p::core::transport::upgrade;
 use libp2p::noise;
@@ -177,12 +175,12 @@ impl NetworkWorker {
 
         let mut swarm_stream = self.network_service.fuse();
         let mut network_stream = self.from_service.fuse();
-        let mut retry_interval = stream::interval(Duration::from_secs(1)).fuse(); // Retry dialing boot nodes every 1 second for faster connection
+        let mut retry_interval = tokio::time::interval(Duration::from_secs(1)); // Retry dialing boot nodes every 1 second for faster connection
         let mut connected_boot_nodes = std::collections::HashSet::new();
 
         loop {
-            select! {
-                _ = retry_interval.next() => {
+            tokio::select! {
+                _ = retry_interval.tick() => {
                     // Periodically retry dialing boot nodes that aren't connected yet
                     for boot_node in &self.boot_nodes {
                         if !connected_boot_nodes.contains(&boot_node.peer_id) {

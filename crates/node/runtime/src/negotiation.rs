@@ -2,8 +2,6 @@ use crate::coordination::{LocalRpcMsg, Phase1Channel};
 use crate::network_proxy::ReceiverProxy;
 use crate::peerset::Peerset;
 use crate::{ComputeAgentAsync, PeersetMsg};
-use async_std::stream;
-use async_std::stream::Interval;
 use futures::channel::{mpsc, oneshot};
 use futures::Stream;
 use futures_util::stream::FuturesOrdered;
@@ -24,7 +22,7 @@ use std::{io, iter};
 
 pub(crate) struct NegotiationChannel {
     rx: Option<mpsc::Receiver<request_responses::IncomingRequest>>,
-    timeout: Interval,
+    timeout: Pin<Box<dyn Future<Output = ()> + Send>>,
     agent: Option<Box<dyn ComputeAgentAsync>>,
     state: Option<NegotiationState>,
 }
@@ -55,7 +53,7 @@ impl NegotiationChannel {
         let local_peer_id = network_service.local_peer_id();
         Self {
             rx: Some(room_rx),
-            timeout: stream::interval(Duration::from_secs(15)),
+            timeout: Box::pin(tokio::time::sleep(Duration::from_secs(15))),
             agent: Some(agent),
             state: Some(NegotiationState {
                 id: room_id,
@@ -99,8 +97,8 @@ impl Future for NegotiationChannel {
         }
 
         if let Some(rx) = responses.borrow_mut() {
-            match rx.try_next() {
-                Ok(Some(Ok((peer_id, _)))) => {
+            match Stream::poll_next(Pin::new(rx), cx) {
+                Poll::Ready(Some(Ok((peer_id, _)))) => {
                     println!("Negotiation: Received response from peer {}", peer_id);
                     peers.insert(peer_id);
                     println!("Negotiation: Collected {}/{} peers so far", peers.len(), n);
@@ -154,7 +152,16 @@ impl Future for NegotiationChannel {
                         });
                     }
                 }
-                _ => {}
+                Poll::Ready(Some(Err(_))) => {
+                    // Request failed, continue
+                }
+                Poll::Ready(None) => {
+                    // Channel closed, remove it
+                    let _ = responses.take();
+                }
+                Poll::Pending => {
+                    // No response yet, continue
+                }
             }
         } else {
             let agent = self.agent.as_ref().unwrap();
@@ -200,7 +207,7 @@ impl Future for NegotiationChannel {
         }
 
         // It took too long for peerset to be assembled  - reset to Phase 1.
-        if let Poll::Ready(Some(())) = Stream::poll_next(Pin::new(&mut self.timeout), cx) {
+        if let Poll::Ready(()) = Future::poll(self.timeout.as_mut(), cx) {
             println!(
                 "Negotiation: Timeout! Collected {}/{} peers. Aborting negotiation.",
                 peers.len(),

@@ -1,20 +1,21 @@
-use crate::negotiation::{NegotiationChannel, StartMsg};
-use crate::network_proxy::ReceiverProxy;
-use crate::peerset::Peerset;
-use crate::{ComputeAgentAsync, PeersetMsg};
-use async_std::stream;
-use async_std::stream::Interval;
+use crate::{
+    negotiation::{NegotiationChannel, StartMsg},
+    network_proxy::ReceiverProxy,
+    peerset::Peerset,
+    ComputeAgentAsync, PeersetMsg,
+};
 use futures::channel::{mpsc, oneshot};
-use futures::Stream;
 use libp2p::PeerId;
 use mpc_network::{
     request_responses, request_responses::MessageType, request_responses::OutgoingResponse,
     NetworkService, RoomId,
 };
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::Duration;
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 pub(crate) struct Phase1Channel {
     id: RoomId,
@@ -61,7 +62,7 @@ impl Future for Phase1Channel {
                         channel: Phase2Channel {
                             id: self.id,
                             rx: self.rx.take(),
-                            timeout: stream::interval(Duration::from_secs(15)),
+                            timeout: Box::pin(tokio::time::sleep(Duration::from_secs(15))),
                             network_service: self.network_service.clone(),
                         },
                     });
@@ -124,7 +125,7 @@ pub(crate) enum Phase1Msg {
 pub(crate) struct Phase2Channel {
     id: RoomId,
     rx: Option<mpsc::Receiver<request_responses::IncomingRequest>>,
-    timeout: Interval,
+    timeout: Pin<Box<dyn Future<Output = ()> + Send>>,
     network_service: NetworkService,
 }
 
@@ -190,7 +191,8 @@ impl Future for Phase2Channel {
         }
 
         // Remote peer gone offline or refused taking in us in set - returning to Phase 1
-        if let Poll::Ready(Some(_)) = Stream::poll_next(Pin::new(&mut self.timeout), cx) {
+
+        if let Poll::Ready(()) = Future::poll(self.timeout.as_mut(), cx) {
             let (ch, tx) = Phase1Channel::new(
                 self.id.clone(),
                 self.rx.take().unwrap(),

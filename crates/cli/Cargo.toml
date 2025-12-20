@@ -15,7 +15,6 @@ mpc-tss = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
 tokio = { workspace = true }
-async-std = { workspace = true }
 async-trait = { workspace = true }
 
 # Error handling

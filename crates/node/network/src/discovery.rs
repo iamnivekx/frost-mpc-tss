@@ -1,5 +1,4 @@
 use crate::Params;
-use async_std::task;
 use libp2p::{
     core::{transport::PortUse, Endpoint, Multiaddr},
     identity::PublicKey,

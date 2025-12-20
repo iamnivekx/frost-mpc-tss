@@ -1,11 +1,11 @@
 use crate::peerset::Peerset;
 use crate::PeersetStorage;
 use anyhow::anyhow;
-use async_std::path::{Path, PathBuf};
 use libp2p::PeerId;
 use mpc_network::RoomId;
 use std::collections::HashMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub struct Ephemeral {

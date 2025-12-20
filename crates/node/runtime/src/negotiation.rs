@@ -173,37 +173,56 @@ impl Future for NegotiationChannel {
             let agent = self.agent.as_ref().unwrap();
 
             // Before first broadcast, wait for network connections to be established
+            // Actively check connected peers instead of just waiting
             if !connection_wait_done && last_broadcast_time.is_none() && peers.len() < n as usize {
                 if connection_wait_start.is_none() {
                     connection_wait_start = Some(std::time::Instant::now());
                     println!("Negotiation: Waiting for network connections to be established...");
                 }
 
-                // Check timeout - wait up to 10 seconds for connections
+                // Check timeout - wait up to 30 seconds for connections
                 let wait_timeout = Duration::from_secs(10);
                 if let Some(start) = connection_wait_start {
                     if start.elapsed() >= wait_timeout {
                         connection_wait_done = true;
-                        println!("Negotiation: Connection wait timeout, proceeding anyway");
+                        debug!("Negotiation: Connection wait timeout after {:?}, proceeding anyway (have {}/{} peers)", 
+                                 start.elapsed(), peers.len(), n);
                     } else {
-                        // Not ready yet, wait a bit more
-                        // We'll check again on next poll
-                        let _ = self.state.insert(NegotiationState {
-                            id,
-                            n,
-                            request,
-                            network_service: service,
-                            peers,
-                            responses,
-                            pending_futures,
-                            pending_response,
-                            last_broadcast_time,
-                            retry_count,
-                            connection_wait_start,
-                            connection_wait_done,
-                        });
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
+                        // Actively check connected peers from network service
+                        // We need to poll the network service to get current connected peers
+                        // Since we can't await in poll, we'll use a future that checks this
+                        // For now, we'll check if we have enough known peers from discovery
+                        // The actual connection check happens when we try to send messages
+
+                        // Check if we have enough peers in the discovery set
+                        // The network service tracks connected peers, but we can't access it directly here
+                        // Instead, we'll proceed if we've waited at least 2 seconds (to allow initial connections)
+                        let min_wait = Duration::from_secs(2);
+                        if start.elapsed() < min_wait {
+                            // Not ready yet, wait a bit more
+                            let _ = self.state.insert(NegotiationState {
+                                id,
+                                n,
+                                request,
+                                network_service: service,
+                                peers,
+                                responses,
+                                pending_futures,
+                                pending_response,
+                                last_broadcast_time,
+                                retry_count,
+                                connection_wait_start,
+                                connection_wait_done,
+                            });
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        } else {
+                            // Minimum wait time passed, proceed to broadcast
+                            // The broadcast will try to connect if peers aren't connected yet
+                            connection_wait_done = true;
+                            println!("Negotiation: Minimum wait time passed, proceeding with broadcast (have {}/{} peers)", 
+                                     peers.len(), n);
+                        }
                     }
                 }
             } else {

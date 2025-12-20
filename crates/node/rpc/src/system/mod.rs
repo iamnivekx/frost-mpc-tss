@@ -29,4 +29,9 @@ impl SystemApiServer for System {
             .collect();
         Ok(peers)
     }
+
+    async fn num_connected_peers(&self) -> RpcResult<usize> {
+        let num = self.network_service.get_connected_peers().await.len();
+        Ok(num)
+    }
 }

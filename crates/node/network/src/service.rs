@@ -181,8 +181,11 @@ impl NetworkWorker {
 
         let mut swarm_stream = self.network_service.fuse();
         let mut network_stream = self.from_service.fuse();
-        let mut retry_interval = tokio::time::interval(Duration::from_secs(1)); // Retry dialing boot nodes every 1 second for faster connection
+        // Use a more aggressive retry interval for faster connection establishment
+        let mut retry_interval = tokio::time::interval(Duration::from_millis(500)); // Retry every 500ms for faster connection
+        retry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut connected_boot_nodes = std::collections::HashSet::new();
+        let mut last_bootstrap_time = std::time::Instant::now();
 
         loop {
             tokio::select! {
@@ -235,6 +238,17 @@ impl NetworkWorker {
                             if self.boot_nodes.iter().any(|bn| bn.peer_id == peer_id) {
                                 connected_boot_nodes.insert(peer_id);
                                 debug!(target: "sub-libp2p", "Boot node {} is now connected", peer_id);
+
+                                // Re-bootstrap Kademlia when we connect to a boot node to speed up discovery
+                                // But don't bootstrap too frequently (at most once per 2 seconds)
+                                if last_bootstrap_time.elapsed() >= Duration::from_secs(2) {
+                                    if let Err(e) = swarm_stream.get_mut().behaviour_mut().bootstrap() {
+                                        debug!(target: "sub-libp2p", "Failed to re-bootstrap Kademlia: {}", e);
+                                    } else {
+                                        debug!(target: "sub-libp2p", "Re-bootstrapping Kademlia after connecting to boot node");
+                                        last_bootstrap_time = std::time::Instant::now();
+                                    }
+                                }
                             }
                         },
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {

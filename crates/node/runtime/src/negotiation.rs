@@ -38,6 +38,8 @@ struct NegotiationState {
     pending_response: oneshot::Sender<anyhow::Result<Vec<u8>>>,
     last_broadcast_time: Option<std::time::Instant>,
     retry_count: u32,
+    connection_wait_start: Option<std::time::Instant>,
+    connection_wait_done: bool,
 }
 
 impl NegotiationChannel {
@@ -66,6 +68,8 @@ impl NegotiationChannel {
                 pending_response,
                 last_broadcast_time: None,
                 retry_count: 0,
+                connection_wait_start: None,
+                connection_wait_done: false,
             }),
         }
     }
@@ -86,6 +90,8 @@ impl Future for NegotiationChannel {
             pending_response,
             mut last_broadcast_time,
             mut retry_count,
+            mut connection_wait_start,
+            mut connection_wait_done,
         } = self.state.take().unwrap();
 
         loop {
@@ -165,8 +171,47 @@ impl Future for NegotiationChannel {
             }
         } else {
             let agent = self.agent.as_ref().unwrap();
+
+            // Before first broadcast, wait for network connections to be established
+            if !connection_wait_done && last_broadcast_time.is_none() && peers.len() < n as usize {
+                if connection_wait_start.is_none() {
+                    connection_wait_start = Some(std::time::Instant::now());
+                    println!("Negotiation: Waiting for network connections to be established...");
+                }
+
+                // Check timeout - wait up to 10 seconds for connections
+                let wait_timeout = Duration::from_secs(10);
+                if let Some(start) = connection_wait_start {
+                    if start.elapsed() >= wait_timeout {
+                        connection_wait_done = true;
+                        println!("Negotiation: Connection wait timeout, proceeding anyway");
+                    } else {
+                        // Not ready yet, wait a bit more
+                        // We'll check again on next poll
+                        let _ = self.state.insert(NegotiationState {
+                            id,
+                            n,
+                            request,
+                            network_service: service,
+                            peers,
+                            responses,
+                            pending_futures,
+                            pending_response,
+                            last_broadcast_time,
+                            retry_count,
+                            connection_wait_start,
+                            connection_wait_done,
+                        });
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                }
+            } else {
+                connection_wait_done = true;
+            }
+
             let should_broadcast = match last_broadcast_time {
-                None => true, // First time, always broadcast
+                None => connection_wait_done, // Only broadcast after connection wait is done
                 Some(last_time) => {
                     // Retry if it's been more than 1 second and we don't have enough peers (more aggressive retry)
                     let elapsed = last_time.elapsed();
@@ -233,6 +278,8 @@ impl Future for NegotiationChannel {
             pending_response,
             last_broadcast_time,
             retry_count,
+            connection_wait_start,
+            connection_wait_done,
         });
 
         // Wake this task to be polled again.

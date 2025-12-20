@@ -9,14 +9,14 @@ use crate::{
     NodeKeyConfig, RoomId,
 };
 use async_channel::{unbounded, Receiver, Sender};
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use futures_util::stream::StreamExt;
 use libp2p::core::transport::upgrade;
 use libp2p::noise;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{tcp, yamux, PeerId, Swarm, Transport};
 use std::time::Duration;
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, collections::HashSet, sync::Arc};
 use tracing::{debug, info, warn};
 
 /// Events emitted by this Service.
@@ -33,6 +33,9 @@ pub enum ServicetoWorkerMsg {
         room_id: RoomId,
         context: MessageContext,
         message: MessageIntent,
+    },
+    GetConnectedPeers {
+        response: oneshot::Sender<HashSet<PeerId>>,
     },
 }
 
@@ -68,6 +71,8 @@ pub struct NetworkWorker {
     from_service: Receiver<ServicetoWorkerMsg>,
     /// The boot nodes to connect to.
     boot_nodes: Vec<MultiaddrWithPeerId>,
+    /// Track connected peers
+    connected_peers: HashSet<PeerId>,
 }
 
 #[derive(Clone)]
@@ -140,6 +145,7 @@ impl NetworkWorker {
             from_service,
             service: Arc::new(service),
             boot_nodes: params.boot_nodes,
+            connected_peers: HashSet::new(),
         };
 
         Ok(worker)
@@ -223,13 +229,18 @@ impl NetworkWorker {
                         SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {:?}", address),
                         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                             info!(target: "sub-libp2p", "Libp2p => Connected({:?})", peer_id);
+                            // Track all connected peers
+                            self.connected_peers.insert(peer_id);
                             // Mark boot node as connected if it's in our boot nodes list
                             if self.boot_nodes.iter().any(|bn| bn.peer_id == peer_id) {
                                 connected_boot_nodes.insert(peer_id);
                                 debug!(target: "sub-libp2p", "Boot node {} is now connected", peer_id);
                             }
                         },
-                        SwarmEvent::ConnectionClosed { peer_id: _, .. } => { }
+                        SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                            self.connected_peers.remove(&peer_id);
+                            connected_boot_nodes.remove(&peer_id);
+                        },
                         _ => continue
                     }
                     None => { break; }
@@ -240,6 +251,9 @@ impl NetworkWorker {
                         let behaviour = swarm_stream.get_mut().behaviour_mut();
 
                         match request {
+                            ServicetoWorkerMsg::GetConnectedPeers { response } => {
+                                let _ = response.send(self.connected_peers.clone());
+                            }
                             ServicetoWorkerMsg::Request {
                                 room_id,
                                 context,
@@ -402,5 +416,15 @@ impl NetworkService {
 
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id.clone()
+    }
+
+    /// Get the set of currently connected peers
+    pub async fn get_connected_peers(&self) -> HashSet<PeerId> {
+        let (tx, rx) = oneshot::channel();
+        self.to_worker
+            .send(ServicetoWorkerMsg::GetConnectedPeers { response: tx })
+            .await
+            .expect("expected worker channel to not be full");
+        rx.await.unwrap_or_default()
     }
 }

@@ -1,9 +1,9 @@
 use anyhow::anyhow;
 use clap::Parser;
 use mpc_network::{Curve, NetworkWorker, NodeKeyConfig, Params, RoomConfig, Secret};
-use mpc_rpc::Tss;
+use mpc_rpc::{System, Tss};
 use mpc_rpc_api::server::JsonRPCServer;
-use mpc_rpc_api::TssApiServer;
+use mpc_rpc_api::{SystemApiServer, TssApiServer};
 use mpc_runtime::{new_worker_and_service, LocalStorage};
 use mpc_tss::{Config, TssFactory};
 use std::iter;
@@ -69,7 +69,7 @@ impl Command {
 
         let local_peer_id = net_service.local_peer_id();
         let (rt_worker, rt_service) = new_worker_and_service(
-            net_service,
+            net_service.clone(),
             iter::once((room_id, room_rx)),
             TssFactory::new(
                 format!("data/{}/key.share", local_peer_id.to_base58()),
@@ -84,11 +84,17 @@ impl Command {
 
         let rpc_server = {
             let tss = Tss::new(rt_service);
+            let system = System::new(net_service);
+            let mut module = tss.into_rpc();
+            module
+                .merge(system.into_rpc())
+                .map_err(|e| anyhow!("failed to merge rpc modules: {}", e))?;
+
             JsonRPCServer::new(
                 mpc_rpc_api::server::Config {
                     host_address: local_party.rpc_addr,
                 },
-                tss.into_rpc(),
+                module,
             )
             .await
             .map_err(|e| anyhow!("json rpc server terminated with err: {}", e))?

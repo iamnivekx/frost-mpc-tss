@@ -43,7 +43,7 @@ use std::{
     task::{Context, Poll},
     time::{Duration, Instant},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 /// Configuration for a single request-response protocol.
 #[derive(Debug, Clone)]

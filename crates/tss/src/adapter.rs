@@ -2,7 +2,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use futures::channel::oneshot;
 use mpc_protocols_frost::{IncomingMessage, MessageReceiver, MessageSender, OutgoingMessage};
-use mpc_runtime::{IncomingRequest, OutgoingResponse};
+use mpc_service::{IncomingRequest, OutgoingResponse};
 
 pub struct RuntimeIncoming {
     inner: async_channel::Receiver<IncomingRequest>,

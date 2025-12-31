@@ -2633,9 +2633,10 @@ dependencies = [
  "futures-util",
  "libp2p",
  "mpc-network",
+ "mpc-node",
  "mpc-rpc",
  "mpc-rpc-api",
- "mpc-runtime",
+ "mpc-service",
  "mpc-tss",
  "serde",
  "serde_ipld_dagcbor",
@@ -2675,6 +2676,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "futures 0.3.31",
+ "libp2p",
+ "mpc-network",
+ "mpc-rpc",
+ "mpc-rpc-api",
+ "mpc-service",
+ "mpc-tss",
+ "serde",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "sha3",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mpc-protocols-codecs"
 version = "0.1.0"
 dependencies = [
@@ -2709,7 +2732,7 @@ dependencies = [
  "libp2p",
  "mpc-network",
  "mpc-rpc-api",
- "mpc-runtime",
+ "mpc-service",
  "mpc-tss",
  "serde",
  "serde_ipld_dagcbor",
@@ -2734,7 +2757,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mpc-runtime"
+name = "mpc-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2768,7 +2791,7 @@ dependencies = [
  "mpc-network",
  "mpc-protocols-codecs",
  "mpc-protocols-frost",
- "mpc-runtime",
+ "mpc-service",
  "serde",
  "serde_json",
  "unsigned-varint 0.8.0",

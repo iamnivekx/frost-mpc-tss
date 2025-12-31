@@ -7,11 +7,11 @@ use std::io::{BufWriter, Write};
 use tracing::debug;
 
 pub struct Tss {
-    rt_service: mpc_runtime::Service,
+    rt_service: mpc_service::Service,
 }
 
 impl Tss {
-    pub fn new(rt_service: mpc_runtime::Service) -> Self {
+    pub fn new(rt_service: mpc_service::Service) -> Self {
         Self { rt_service }
     }
 }

@@ -1,19 +1,21 @@
 [package]
-name = "mpc-tss"
+name = "mpc-service"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 # Internal workspace crates
 mpc-network = { workspace = true }
-mpc-service = { workspace = true }
-mpc-protocols-codecs = { workspace = true }
-mpc-protocols-frost = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
 
 # Async runtime
 futures = { workspace = true }
+futures-util = { workspace = true }
 async-channel = { workspace = true }
 async-trait = { workspace = true }
+tokio = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }
@@ -25,7 +27,10 @@ unsigned-varint = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
 
-# FROST
-frost-ed25519 = { workspace = true }
-frost-secp256k1 = { workspace = true }
+# Cryptography
+blake2 = { workspace = true }
+
+# Utilities
+itertools = { workspace = true }

@@ -2,7 +2,7 @@ use crate::adapter::{RuntimeIncoming, RuntimeOutgoing};
 use anyhow::{anyhow, Context};
 use mpc_protocols_codecs as codecs;
 use mpc_protocols_frost::{run_signing, KeyShare};
-use mpc_runtime::{IncomingRequest, OutgoingResponse, Peerset};
+use mpc_service::{IncomingRequest, OutgoingResponse, Peerset};
 use std::{collections::BTreeSet, fs};
 
 pub struct KeySign {
@@ -10,7 +10,7 @@ pub struct KeySign {
 }
 
 #[async_trait::async_trait]
-impl mpc_runtime::ComputeAgentAsync for KeySign {
+impl mpc_service::ComputeAgentAsync for KeySign {
     fn protocol_id(&self) -> u64 {
         1
     }
@@ -83,7 +83,6 @@ impl KeySign {
     pub fn new(p: &str) -> Self {
         Self { path: p.to_owned() }
     }
-
     fn read_key_share(&self) -> anyhow::Result<KeyShare> {
         let share_bytes = fs::read(&self.path).context("failed to read local key")?;
         let key_share: KeyShare =

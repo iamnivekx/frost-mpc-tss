@@ -3,7 +3,7 @@ use anyhow::{anyhow, Context};
 use mpc_network::Curve;
 use mpc_protocols_codecs as codecs;
 use mpc_protocols_frost::{run_dkg, KeyShare, PublicKey};
-use mpc_runtime::{IncomingRequest, OutgoingResponse, Peerset};
+use mpc_service::{IncomingRequest, OutgoingResponse, Peerset};
 use std::{
     fs,
     io::{BufReader, Write},
@@ -16,7 +16,7 @@ pub struct KeyGen {
 }
 
 #[async_trait::async_trait]
-impl mpc_runtime::ComputeAgentAsync for KeyGen {
+impl mpc_service::ComputeAgentAsync for KeyGen {
     fn protocol_id(&self) -> u64 {
         0
     }
@@ -122,8 +122,7 @@ impl mpc_runtime::ComputeAgentAsync for KeyGen {
             bytes: group_pk_bytes,
         };
 
-        let pk_bytes =
-            codecs::encode(&pk).map_err(|e| anyhow!("error encoding public key {e}"))?;
+        let pk_bytes = codecs::encode(&pk).map_err(|e| anyhow!("error encoding public key {e}"))?;
 
         Ok(pk_bytes)
     }
@@ -136,7 +135,6 @@ impl KeyGen {
             curve,
         }
     }
-
     fn save_key_share(&self, key_share: KeyShare) -> anyhow::Result<Vec<u8>> {
         let path = Path::new(self.path.as_str());
         let dir = path.parent().context("failed to get parent directory")?;

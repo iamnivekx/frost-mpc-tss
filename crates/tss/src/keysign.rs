@@ -5,7 +5,7 @@ use frost_core::{
     Ciphersuite, Identifier, SigningPackage,
 };
 use mpc_network::Curve;
-use mpc_runtime::{IncomingRequest, OutgoingResponse, Peerset};
+use mpc_service::{IncomingRequest, OutgoingResponse, Peerset};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -30,7 +30,7 @@ pub struct KeySign {
 }
 
 #[async_trait::async_trait]
-impl mpc_runtime::ComputeAgentAsync for KeySign {
+impl mpc_service::ComputeAgentAsync for KeySign {
     fn protocol_id(&self) -> u64 {
         1
     }
@@ -158,7 +158,7 @@ impl KeySign {
         );
         let (tx1, rx1) = futures::channel::oneshot::channel();
         rt_outgoing
-            .send(mpc_runtime::OutgoingResponse {
+            .send(mpc_service::OutgoingResponse {
                 body: commitments_payload_cbor,
                 to: None,
                 sent_feedback: Some(tx1),
@@ -265,7 +265,7 @@ impl KeySign {
         );
         let (tx2, rx2) = futures::channel::oneshot::channel();
         rt_outgoing
-            .send(mpc_runtime::OutgoingResponse {
+            .send(mpc_service::OutgoingResponse {
                 body: sig_share_payload_cbor,
                 to: None,
                 sent_feedback: Some(tx2),

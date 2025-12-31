@@ -4,7 +4,7 @@ use mpc_network::{Curve, NetworkWorker, NodeKeyConfig, Params, RoomConfig, Secre
 use mpc_rpc::{System, Tss};
 use mpc_rpc_api::server::JsonRPCServer;
 use mpc_rpc_api::{SystemApiServer, TssApiServer};
-use mpc_runtime::{new_worker_and_service, LocalStorage};
+use mpc_service::{new_worker_and_service, LocalStorage};
 use mpc_tss::{Config, TssFactory};
 use std::iter;
 use std::path::Path;

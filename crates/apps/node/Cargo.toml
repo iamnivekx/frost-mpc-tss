@@ -1,28 +1,32 @@
 [package]
-name = "mpc-runtime"
+name = "mpc-node"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 # Internal workspace crates
 mpc-network = { workspace = true }
-
-# Logging
-tracing = { workspace = true }
+mpc-service = { workspace = true }
+mpc-rpc = { workspace = true }
+mpc-rpc-api = { workspace = true }
+mpc-tss = { workspace = true }
 
 # Async runtime
 futures = { workspace = true }
-futures-util = { workspace = true }
-async-channel = { workspace = true }
-async-trait = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }
 
+# CLI
+clap = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
 # Networking
 libp2p = { workspace = true }
-unsigned-varint = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
@@ -30,7 +34,4 @@ serde_json = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 
 # Cryptography
-blake2 = { workspace = true }
-
-# Utilities
-itertools = { workspace = true }
+sha3 = { workspace = true }

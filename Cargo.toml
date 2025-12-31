@@ -5,8 +5,8 @@ members = [
     "crates/tss",
     "crates/client/network",
     "crates/client/service",
-    "crates/node/rpc",
-    "crates/node/rpc-api",
+    "crates/client/rpc",
+    "crates/client/rpc-api",
 ]
 
 [workspace.package]
@@ -18,8 +18,8 @@ authors = ["nivek <h499871809@gmail.com>"]
 [workspace.dependencies]
 # Internal workspace crates
 mpc-network = { path = "crates/client/network" }
-mpc-rpc = { path = "crates/node/rpc" }
-mpc-rpc-api = { path = "crates/node/rpc-api" }
+mpc-rpc = { path = "crates/client/rpc" }
+mpc-rpc-api = { path = "crates/client/rpc-api" }
 mpc-service = { path = "crates/client/service" }
 mpc-tss = { path = "crates/tss" }
 

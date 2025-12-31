@@ -19,6 +19,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use std::{io, iter};
+use tracing::debug;
 
 pub(crate) struct NegotiationChannel {
     rx: Option<mpsc::Receiver<request_responses::IncomingRequest>>,

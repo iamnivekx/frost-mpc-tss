@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/cli",
+    "crates/protocols/codecs",
+    "crates/protocols/frost",
     "crates/tss",
     "crates/node/network",
     "crates/node/runtime",
@@ -22,6 +24,8 @@ mpc-rpc = { path = "crates/node/rpc" }
 mpc-rpc-api = { path = "crates/node/rpc-api" }
 mpc-runtime = { path = "crates/node/runtime" }
 mpc-tss = { path = "crates/tss" }
+mpc-protocols-codecs = { path = "crates/protocols/codecs" }
+mpc-protocols-frost = { path = "crates/protocols/frost" }
 
 # Async runtime
 futures = { version = "0.3.31", features = ["compat"] }

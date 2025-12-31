@@ -2675,6 +2675,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-protocols-codecs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_ipld_dagcbor",
+]
+
+[[package]]
+name = "mpc-protocols-frost"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "frost-core",
+ "frost-ed25519",
+ "frost-secp256k1",
+ "mpc-network",
+ "mpc-protocols-codecs",
+ "rand 0.8.5",
+ "serde",
+]
+
+[[package]]
 name = "mpc-rpc"
 version = "0.1.0"
 dependencies = [
@@ -2737,22 +2761,16 @@ dependencies = [
  "anyhow",
  "async-channel",
  "async-trait",
- "blake2",
- "frost-core",
  "frost-ed25519",
  "frost-secp256k1",
  "futures 0.3.31",
- "futures-util",
- "hex",
  "libp2p",
  "mpc-network",
+ "mpc-protocols-codecs",
+ "mpc-protocols-frost",
  "mpc-runtime",
- "rand 0.8.5",
  "serde",
- "serde_ipld_dagcbor",
  "serde_json",
- "strum",
- "tokio",
  "unsigned-varint 0.8.0",
 ]
 

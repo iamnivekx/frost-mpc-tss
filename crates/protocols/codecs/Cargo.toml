@@ -1,0 +1,9 @@
+[package]
+name = "mpc-protocols-codecs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }

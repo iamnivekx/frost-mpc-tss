@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/cli",
+    "crates/apps/cli",
+    "crates/apps/node",
     "crates/tss",
     "crates/client/network",
     "crates/client/service",
@@ -18,6 +19,7 @@ authors = ["nivek <h499871809@gmail.com>"]
 [workspace.dependencies]
 # Internal workspace crates
 mpc-network = { path = "crates/client/network" }
+mpc-node = { path = "crates/apps/node" }
 mpc-rpc = { path = "crates/client/rpc" }
 mpc-rpc-api = { path = "crates/client/rpc-api" }
 mpc-service = { path = "crates/client/service" }

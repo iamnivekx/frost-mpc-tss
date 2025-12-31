@@ -2633,6 +2633,7 @@ dependencies = [
  "futures-util",
  "libp2p",
  "mpc-network",
+ "mpc-node",
  "mpc-rpc",
  "mpc-rpc-api",
  "mpc-service",
@@ -2672,6 +2673,28 @@ dependencies = [
  "unsigned-varint 0.8.0",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "mpc-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "futures 0.3.31",
+ "libp2p",
+ "mpc-network",
+ "mpc-rpc",
+ "mpc-rpc-api",
+ "mpc-service",
+ "mpc-tss",
+ "serde",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "sha3",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

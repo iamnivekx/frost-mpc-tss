@@ -9,6 +9,7 @@ mpc-network = { workspace = true }
 mpc-service = { workspace = true }
 mpc-rpc = { workspace = true }
 mpc-rpc-api = { workspace = true }
+mpc-node = { workspace = true }
 mpc-tss = { workspace = true }
 
 # Async runtime

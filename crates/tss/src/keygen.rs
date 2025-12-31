@@ -5,7 +5,7 @@ use frost_core::{
     Ciphersuite, Identifier,
 };
 use mpc_network::Curve;
-use mpc_runtime::{IncomingRequest, OutgoingResponse, Peerset};
+use mpc_service::{IncomingRequest, OutgoingResponse, Peerset};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -32,7 +32,7 @@ pub struct KeyGen {
 }
 
 #[async_trait::async_trait]
-impl mpc_runtime::ComputeAgentAsync for KeyGen {
+impl mpc_service::ComputeAgentAsync for KeyGen {
     fn protocol_id(&self) -> u64 {
         0
     }
@@ -190,7 +190,7 @@ impl KeyGen {
             .map_err(|e| anyhow!("failed to encode round1 package: {e}"))?;
         let (tx1, _rx1) = futures::channel::oneshot::channel();
         outgoing
-            .send(mpc_runtime::OutgoingResponse {
+            .send(mpc_service::OutgoingResponse {
                 body: round1_payload_cbor,
                 to: None,
                 sent_feedback: Some(tx1),
@@ -299,7 +299,7 @@ impl KeyGen {
                 .map_err(|e| anyhow!("failed to encode round2 package: {e}"))?;
             let (tx2, _rx2) = futures::channel::oneshot::channel();
             outgoing
-                .send(mpc_runtime::OutgoingResponse {
+            .send(mpc_service::OutgoingResponse {
                     body: payload_cbor,
                     to: Some(*recipient_u16),
                     sent_feedback: Some(tx2),

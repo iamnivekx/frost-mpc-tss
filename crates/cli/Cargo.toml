@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 # Internal workspace crates
 mpc-network = { workspace = true }
-mpc-runtime = { workspace = true }
+mpc-service = { workspace = true }
 mpc-rpc = { workspace = true }
 mpc-rpc-api = { workspace = true }
 mpc-tss = { workspace = true }

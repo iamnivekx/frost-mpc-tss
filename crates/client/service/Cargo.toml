@@ -1,5 +1,5 @@
 [package]
-name = "mpc-runtime"
+name = "mpc-service"
 version.workspace = true
 edition.workspace = true
 

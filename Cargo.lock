@@ -2635,7 +2635,7 @@ dependencies = [
  "mpc-network",
  "mpc-rpc",
  "mpc-rpc-api",
- "mpc-runtime",
+ "mpc-service",
  "mpc-tss",
  "serde",
  "serde_ipld_dagcbor",
@@ -2685,7 +2685,7 @@ dependencies = [
  "libp2p",
  "mpc-network",
  "mpc-rpc-api",
- "mpc-runtime",
+ "mpc-service",
  "mpc-tss",
  "serde",
  "serde_ipld_dagcbor",
@@ -2710,7 +2710,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mpc-runtime"
+name = "mpc-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2746,7 +2746,7 @@ dependencies = [
  "hex",
  "libp2p",
  "mpc-network",
- "mpc-runtime",
+ "mpc-service",
  "rand 0.8.5",
  "serde",
  "serde_ipld_dagcbor",

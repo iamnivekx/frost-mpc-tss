@@ -3,8 +3,8 @@ resolver = "2"
 members = [
     "crates/cli",
     "crates/tss",
-    "crates/node/network",
-    "crates/node/runtime",
+    "crates/client/network",
+    "crates/client/service",
     "crates/node/rpc",
     "crates/node/rpc-api",
 ]
@@ -17,10 +17,10 @@ authors = ["nivek <h499871809@gmail.com>"]
 
 [workspace.dependencies]
 # Internal workspace crates
-mpc-network = { path = "crates/node/network" }
+mpc-network = { path = "crates/client/network" }
 mpc-rpc = { path = "crates/node/rpc" }
 mpc-rpc-api = { path = "crates/node/rpc-api" }
-mpc-runtime = { path = "crates/node/runtime" }
+mpc-service = { path = "crates/client/service" }
 mpc-tss = { path = "crates/tss" }
 
 # Async runtime

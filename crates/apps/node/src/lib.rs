@@ -1,5 +1,6 @@
 use anyhow::anyhow;
 use clap::Parser;
+use futures::{channel::mpsc as futures_mpsc, SinkExt};
 use mpc_network::{Curve, NetworkWorker, NodeKeyConfig, Params, RoomConfig, Secret};
 use mpc_rpc::{System, Tss};
 use mpc_rpc_api::server::JsonRPCServer;
@@ -51,6 +52,15 @@ impl Command {
             boot_nodes.clone().into_iter(),
             config.boot_nodes.len(),
         );
+        let (room_tx_bridge, room_rx_bridge) = futures_mpsc::channel(1024);
+        let room_bridge_task = task::spawn(async move {
+            let mut room_tx_bridge = room_tx_bridge;
+            while let Ok(msg) = room_rx.recv().await {
+                if room_tx_bridge.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
 
         let params = Params {
             listen_address: local_party.network_peer.multiaddr.clone(),
@@ -70,7 +80,7 @@ impl Command {
         let local_peer_id = net_service.local_peer_id();
         let (rt_worker, rt_service) = new_worker_and_service(
             net_service.clone(),
-            iter::once((room_id, room_rx)),
+            iter::once((room_id, room_rx_bridge)),
             TssFactory::new(
                 format!("data/{}/key.share", local_peer_id.to_base58()),
                 Curve::Ed25519,
@@ -104,8 +114,10 @@ impl Command {
 
         rt_task.abort();
         net_task.abort();
+        room_bridge_task.abort();
         let _ = rt_task.await;
         let _ = net_task.await;
+        let _ = room_bridge_task.await;
 
         info!("Node stopped");
 

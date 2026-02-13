@@ -1,26 +1,72 @@
-// This file was a part of Substrate.
-// broadcast.rc <> request_response.rc
-
-// Copyright (C) 2019-2022 Parity Technologies (UK) Ltd.
+// This file is part of Substrate.
+//
+// Copyright (C) Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
-
+//
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
-
+//
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
-
+//
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
-use futures::{
-    channel::{mpsc, oneshot},
-    prelude::*,
+
+//! Collection of request-response protocols.
+//!
+//! The [`RequestResponsesBehaviour`] struct defined in this module provides support for zero or
+//! more so-called "request-response" protocols.
+//!
+//! A request-response protocol works in the following way:
+//!
+//! - For every emitted request, a new substream is open and the protocol is negotiated. If the
+//! remote supports the protocol, the size of the request is sent as a LEB128 number, followed
+//! with the request itself. The remote then sends the size of the response as a LEB128 number,
+//! followed with the response.
+//!
+//! - Requests have a certain time limit before they time out. This time includes the time it
+//! takes to send/receive the request and response.
+//!
+//! - If provided, a ["requests processing"](ProtocolConfig::inbound_queue) channel
+//! is used to handle incoming requests.
+
+use crate::{
+    peer_store::{PeerStoreProvider, BANNED_THRESHOLD},
+    types::{ProtocolName, ReputationChange},
 };
-pub use libp2p::request_response::{InboundFailure, InboundRequestId, OutboundRequestId};
+
+use futures::{channel::oneshot, prelude::*};
+use libp2p::{
+    core::{transport::PortUse, Endpoint, Multiaddr},
+    request_response::{self, Behaviour, Codec, Message, ProtocolSupport, ResponseChannel},
+    swarm::{
+        behaviour::FromSwarm, handler::multi::MultiHandler, ConnectionDenied, ConnectionId,
+        NetworkBehaviour, THandler, THandlerInEvent, THandlerOutEvent, ToSwarm,
+    },
+    PeerId,
+};
+
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    io, iter,
+    ops::Deref,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "sub-libp2p::request-response";
+
+/// Periodically check if requests are taking too long.
+const PERIODIC_REQUEST_CHECK: Duration = Duration::from_secs(2);
+
+pub use libp2p::request_response::{Config, InboundRequestId, OutboundRequestId};
 
 /// Possible failures occurring in the context of sending an outbound request and receiving the
 /// response.
@@ -43,57 +89,82 @@ pub enum OutboundFailure {
     Io(Arc<io::Error>),
 }
 
-impl From<libp2p::request_response::OutboundFailure> for OutboundFailure {
-    fn from(out: libp2p::request_response::OutboundFailure) -> Self {
+impl From<request_response::OutboundFailure> for OutboundFailure {
+    fn from(out: request_response::OutboundFailure) -> Self {
         match out {
-            libp2p::request_response::OutboundFailure::DialFailure => OutboundFailure::DialFailure,
-            libp2p::request_response::OutboundFailure::Timeout => OutboundFailure::Timeout,
-            libp2p::request_response::OutboundFailure::ConnectionClosed => {
+            request_response::OutboundFailure::DialFailure => OutboundFailure::DialFailure,
+            request_response::OutboundFailure::Timeout => OutboundFailure::Timeout,
+            request_response::OutboundFailure::ConnectionClosed => {
                 OutboundFailure::ConnectionClosed
             }
-            libp2p::request_response::OutboundFailure::UnsupportedProtocols => {
+            request_response::OutboundFailure::UnsupportedProtocols => {
                 OutboundFailure::UnsupportedProtocols
             }
-            libp2p::request_response::OutboundFailure::Io(error) => {
-                OutboundFailure::Io(Arc::new(error))
-            }
+            request_response::OutboundFailure::Io(error) => OutboundFailure::Io(Arc::new(error)),
         }
     }
 }
-use libp2p::{
-    core::{transport::PortUse, Endpoint, Multiaddr},
-    request_response::{
-        self, Behaviour, Codec, Event as RequestResponseEvent, Message, ProtocolSupport,
-        ResponseChannel,
-    },
-    swarm::{
-        behaviour::FromSwarm, handler::multi::MultiHandler, ConnectionDenied, ConnectionId,
-        NetworkBehaviour, THandler, THandlerInEvent, THandlerOutEvent, ToSwarm,
-    },
-    PeerId,
-};
-use std::{
-    borrow::Cow,
-    collections::{hash_map::Entry, HashMap},
-    io, iter,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-    time::{Duration, Instant},
-};
-use tracing::{debug, error, warn};
 
-/// Logging target for the file.
-const LOG_TARGET: &str = "sub-libp2p::request-response";
+/// Possible failures occurring in the context of receiving an inbound request and sending a
+/// response.
+#[derive(Debug, thiserror::Error)]
+pub enum InboundFailure {
+    /// The inbound request timed out, either while reading the incoming request or before a
+    /// response is sent
+    #[error("Timeout while receiving request or sending response")]
+    Timeout,
+    /// The connection closed before a response could be send.
+    #[error("Connection was closed before a response could be sent")]
+    ConnectionClosed,
+    /// The local peer supports none of the protocols requested by the remote.
+    #[error("The local peer supports none of the protocols requested by the remote")]
+    UnsupportedProtocols,
+    /// The local peer failed to respond to an inbound request
+    #[error("The response channel was dropped without sending a response to the remote")]
+    ResponseOmission,
+    /// An IO failure happened on an inbound stream.
+    #[error("An IO failure happened on an inbound stream")]
+    Io(Arc<io::Error>),
+}
 
-/// Periodically check if requests are taking too long.
-const PERIODIC_REQUEST_CHECK: Duration = Duration::from_secs(2);
+impl From<request_response::InboundFailure> for InboundFailure {
+    fn from(out: request_response::InboundFailure) -> Self {
+        match out {
+            request_response::InboundFailure::ResponseOmission => InboundFailure::ResponseOmission,
+            request_response::InboundFailure::Timeout => InboundFailure::Timeout,
+            request_response::InboundFailure::ConnectionClosed => InboundFailure::ConnectionClosed,
+            request_response::InboundFailure::UnsupportedProtocols => {
+                InboundFailure::UnsupportedProtocols
+            }
+            request_response::InboundFailure::Io(error) => InboundFailure::Io(Arc::new(error)),
+        }
+    }
+}
+
+/// Error in a request.
+#[derive(Debug, thiserror::Error)]
+#[allow(missing_docs)]
+pub enum RequestFailure {
+    #[error("We are not currently connected to the requested peer.")]
+    NotConnected,
+    #[error("Given protocol hasn't been registered.")]
+    UnknownProtocol,
+    #[error("Remote has closed the substream before answering, thereby signaling that it considers the request as valid, but refused to answer it.")]
+    Refused,
+    #[error("The remote replied, but the local node is no longer interested in the response.")]
+    Obsolete,
+    #[error("Problem on the network: {0}")]
+    Network(OutboundFailure),
+}
 
 /// Configuration for a single request-response protocol.
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
     /// Name of the protocol on the wire. Should be something like `/foo/bar`.
-    pub name: Cow<'static, str>,
+    pub name: ProtocolName,
+
+    /// Fallback on the wire protocol names to support.
+    pub fallback_names: Vec<ProtocolName>,
 
     /// Maximum allowed size, in bytes, of a request.
     ///
@@ -112,17 +183,38 @@ pub struct ProtocolConfig {
     /// If you expect the response to come back quickly, you should set this to a smaller duration.
     pub request_timeout: Duration,
 
-    /// Channel on which the networking service will send incoming messages.
-    pub inbound_queue: Option<mpsc::Sender<IncomingRequest>>,
+    /// Channel on which the networking service will send incoming requests.
+    ///
+    /// Every time a peer sends a request to the local node using this protocol, the networking
+    /// service will push an element on this channel. The receiving side of this channel then has
+    /// to pull this element, process the request, and send back the response to send back to the
+    /// peer.
+    ///
+    /// The size of the channel has to be carefully chosen. If the channel is full, the networking
+    /// service will discard the incoming request send back an error to the peer. Consequently,
+    /// the channel being full is an indicator that the node is overloaded.
+    ///
+    /// You can typically set the size of the channel to `T / d`, where `T` is the
+    /// `request_timeout` and `d` is the expected average duration of CPU and I/O it takes to
+    /// build a response.
+    ///
+    /// Can be `None` if the local node does not support answering incoming requests.
+    /// If this is `None`, then the local node will not advertise support for this protocol towards
+    /// other peers. If this is `Some` but the channel is closed, then the local node will
+    /// advertise support for this protocol, but any incoming request will lead to an error being
+    /// sent back.
+    pub inbound_queue: Option<async_channel::Sender<IncomingRequest>>,
 }
 
 impl ProtocolConfig {
+    /// Create a new `ProtocolConfig` with default values.
     pub fn new(
-        name: Cow<'static, str>,
-        inbound_queue: Option<mpsc::Sender<IncomingRequest>>,
+        name: impl Into<ProtocolName>,
+        inbound_queue: Option<async_channel::Sender<IncomingRequest>>,
     ) -> Self {
         Self {
-            name,
+            name: name.into(),
+            fallback_names: Vec::new(),
             max_request_size: 8 * 1024 * 1024,
             max_response_size: 10 * 1024,
             request_timeout: Duration::from_secs(30),
@@ -134,18 +226,26 @@ impl ProtocolConfig {
 /// A single request received by a peer on a request-response protocol.
 #[derive(Debug)]
 pub struct IncomingRequest {
-    /// Who sent the request.
-    pub peer_id: PeerId,
+    /// Metadata attached to this message on wire.
+    pub context: MessageContext,
 
     /// Who sent the request.
+    pub peer: PeerId,
+
+    /// Backward-compatible alias for `peer`.
+    pub peer_id: PeerId,
+
+    /// Whether this request was sent as broadcast.
+    pub is_broadcast: bool,
+
+    /// Peer index in current peerset.
+    ///
+    /// This is assigned by the service-layer receiver proxy once a peerset is known.
     pub peer_index: u16,
 
     /// Request sent by the remote. Will always be smaller than
     /// [`ProtocolConfig::max_request_size`].
     pub payload: Vec<u8>,
-
-    /// Message send to all peers in the room.
-    pub is_broadcast: bool,
 
     /// Channel to send back the response.
     ///
@@ -156,9 +256,6 @@ pub struct IncomingRequest {
     /// 2. Sending an `Err(())` via `pending_response`, optionally including reputation changes for
     /// the given peer.
     pub pending_response: oneshot::Sender<OutgoingResponse>,
-
-    /// Protocol execution context.
-    pub context: MessageContext,
 }
 
 /// Response for an incoming request to be send by a request protocol handler.
@@ -190,7 +287,7 @@ pub enum Event {
         /// Peer which has emitted the request.
         peer: PeerId,
         /// Name of the protocol in question.
-        protocol: Cow<'static, str>,
+        protocol: ProtocolName,
         /// Whether handling the request was successful or unsuccessful.
         ///
         /// When successful contains the time elapsed between when we received the request and when
@@ -206,11 +303,19 @@ pub enum Event {
         /// Peer that we send a request to.
         peer: PeerId,
         /// Name of the protocol in question.
-        protocol: Cow<'static, str>,
+        protocol: ProtocolName,
         /// Duration the request took.
         duration: Duration,
         /// Result of the request.
         result: Result<(), RequestFailure>,
+    },
+
+    /// A request protocol handler issued reputation changes for the given peer.
+    ReputationChanges {
+        /// Peer whose reputation needs to be adjust.
+        peer: PeerId,
+        /// Reputation changes.
+        changes: Vec<ReputationChange>,
     },
 }
 
@@ -222,12 +327,12 @@ pub enum Event {
 /// [`ProtocolRequestId`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProtocolRequestId<RequestId> {
-    protocol: Cow<'static, str>,
+    protocol: ProtocolName,
     request_id: RequestId,
 }
 
-impl<RequestId> From<(Cow<'static, str>, RequestId)> for ProtocolRequestId<RequestId> {
-    fn from((protocol, request_id): (Cow<'static, str>, RequestId)) -> Self {
+impl<RequestId> From<(ProtocolName, RequestId)> for ProtocolRequestId<RequestId> {
+    fn from((protocol, request_id): (ProtocolName, RequestId)) -> Self {
         Self {
             protocol,
             request_id,
@@ -255,21 +360,6 @@ impl IfDisconnected {
     }
 }
 
-// This is a state of processing incoming request Message.
-// The main reason of this struct is to hold `get_peer_reputation` as a Future state.
-struct MessageRequest {
-    peer: PeerId,
-    request_id: InboundRequestId,
-    request: WireMessage,
-    channel: ResponseChannel<Result<Vec<u8>, ()>>,
-    protocol: String,
-    resp_builder: Option<mpsc::Sender<IncomingRequest>>,
-    // Once we get incoming request we save all params, create an async call to Peerset
-    // to get the reputation of the peer.
-    // get_peer_reputation: Pin<Box<dyn Future<Output = Result<i32, ()>> + Send>>,
-    // get_peer_index: Pin<Box<dyn Future<Output = Result<u16, ()>> + Send>>,
-}
-
 /// Information stored about a pending request.
 struct PendingRequest {
     /// The time when the request was sent to the libp2p request-response protocol.
@@ -278,13 +368,15 @@ struct PendingRequest {
     ///
     /// This is wrapped in an `Option` to allow for the channel to be taken out
     /// on force-detected timeouts.
-    response_tx: Option<mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>>,
+    response_tx: Option<oneshot::Sender<Result<(Vec<u8>, ProtocolName), RequestFailure>>>,
+    /// Fallback request to send if the primary request fails.
+    fallback_request: Option<(Vec<u8>, ProtocolName)>,
 }
 
 /// Details of a request-response protocol.
 struct ProtocolDetails {
     behaviour: Behaviour<GenericCodec>,
-    inbound_queue: Option<mpsc::Sender<IncomingRequest>>,
+    inbound_queue: Option<async_channel::Sender<IncomingRequest>>,
     request_timeout: Duration,
 }
 
@@ -292,18 +384,18 @@ struct ProtocolDetails {
 struct RequestProcessingOutcome {
     peer: PeerId,
     request_id: InboundRequestId,
-    protocol: Cow<'static, str>,
+    protocol: ProtocolName,
     inner_channel: ResponseChannel<Result<Vec<u8>, ()>>,
     response: OutgoingResponse,
 }
 
-/// Implementation of `NetworkBehaviour` that provides support for broadcast protocols.
+/// Implementation of `NetworkBehaviour` that provides support for request-response protocols.
 pub struct RequestResponsesBehaviour {
     /// The multiple sub-protocols, by name.
     ///
     /// Contains the underlying libp2p request-response [`Behaviour`], plus an optional
     /// "response builder" used to build responses for incoming requests.
-    protocols: HashMap<Cow<'static, str>, ProtocolDetails>,
+    protocols: HashMap<ProtocolName, ProtocolDetails>,
 
     /// Pending requests, passed down to a request-response [`Behaviour`], awaiting a reply.
     pending_requests: HashMap<ProtocolRequestId<OutboundRequestId>, PendingRequest>,
@@ -321,9 +413,8 @@ pub struct RequestResponsesBehaviour {
     /// when the request has been sent out.
     send_feedback: HashMap<ProtocolRequestId<InboundRequestId>, oneshot::Sender<()>>,
 
-    /// Pending message request, holds `MessageRequest` as a Future state to poll it
-    /// until we get a response from `Peerset`
-    message_request: Option<MessageRequest>,
+    /// Primarily used to get a reputation of a node.
+    peer_store: Arc<dyn PeerStoreProvider>,
 
     /// Interval to check that the requests are not taking too long.
     ///
@@ -337,11 +428,13 @@ pub struct RequestResponsesBehaviour {
 impl RequestResponsesBehaviour {
     /// Creates a new behaviour. Must be passed a list of supported protocols. Returns an error if
     /// the same protocol is passed twice.
-    pub fn new(list: impl Iterator<Item = ProtocolConfig>) -> Result<Self, RegisterError> {
+    pub fn new(
+        list: impl Iterator<Item = ProtocolConfig>,
+        peer_store: Arc<dyn PeerStoreProvider>,
+    ) -> Result<Self, RegisterError> {
         let mut protocols = HashMap::new();
         for protocol in list {
-            let cfg =
-                request_response::Config::default().with_request_timeout(protocol.request_timeout);
+            let cfg = Config::default().with_request_timeout(protocol.request_timeout);
 
             let protocol_support = if protocol.inbound_queue.is_some() {
                 ProtocolSupport::Full
@@ -349,26 +442,35 @@ impl RequestResponsesBehaviour {
                 ProtocolSupport::Outbound
             };
 
-            // Convert protocol.name to a static string to avoid lifetime issues
-            // StreamProtocol::new takes &str and stores it internally, so we need
-            // a string that lives long enough. Converting to String and then to &'static str
-            let protocol_name = protocol.name.clone();
-            let protocol_name_static: &'static str =
-                Box::leak(protocol_name.as_ref().to_string().into_boxed_str());
+            // Convert ProtocolName to StreamProtocol for libp2p
+            let protocol_name_str = protocol.name.deref().to_string();
+            let protocol_name_static: &'static str = Box::leak(protocol_name_str.into_boxed_str());
             let protocol_stream = libp2p::swarm::StreamProtocol::new(protocol_name_static);
-            let rq_rp = Behaviour::with_codec(
+
+            let fallback_streams: Vec<_> = protocol
+                .fallback_names
+                .iter()
+                .map(|name| {
+                    let name_str = name.deref().to_string();
+                    let name_static: &'static str = Box::leak(name_str.into_boxed_str());
+                    libp2p::swarm::StreamProtocol::new(name_static)
+                })
+                .collect();
+
+            let behaviour = Behaviour::with_codec(
                 GenericCodec {
                     max_request_size: protocol.max_request_size,
                     max_response_size: protocol.max_response_size,
                 },
-                iter::once((protocol_stream, protocol_support)),
+                iter::once(protocol_stream)
+                    .chain(fallback_streams)
+                    .zip(iter::repeat(protocol_support)),
                 cfg,
             );
 
-            // Now we can safely move protocol_name into entry
-            match protocols.entry(protocol_name) {
+            match protocols.entry(protocol.name) {
                 Entry::Vacant(e) => e.insert(ProtocolDetails {
-                    behaviour: rq_rp,
+                    behaviour,
                     inbound_queue: protocol.inbound_queue,
                     request_timeout: protocol.request_timeout,
                 }),
@@ -384,7 +486,7 @@ impl RequestResponsesBehaviour {
             pending_responses: Default::default(),
             pending_responses_arrival_time: Default::default(),
             send_feedback: Default::default(),
-            message_request: None,
+            peer_store,
             periodic_request_check: tokio::time::interval(PERIODIC_REQUEST_CHECK),
         })
     }
@@ -398,97 +500,179 @@ impl RequestResponsesBehaviour {
     pub fn send_request(
         &mut self,
         target: &PeerId,
+        protocol_name: ProtocolName,
+        request: Vec<u8>,
+        fallback_request: Option<(Vec<u8>, ProtocolName)>,
+        pending_response: oneshot::Sender<Result<(Vec<u8>, ProtocolName), RequestFailure>>,
+        connect: IfDisconnected,
+    ) {
+        log::trace!(target: LOG_TARGET, "send request to {target} ({protocol_name:?}), {} bytes", request.len());
+
+        if let Some(ProtocolDetails { behaviour, .. }) =
+            self.protocols.get_mut(protocol_name.deref())
+        {
+            Self::send_request_inner(
+                behaviour,
+                &mut self.pending_requests,
+                target,
+                protocol_name,
+                request,
+                fallback_request,
+                pending_response,
+                connect,
+            )
+        } else if pending_response
+            .send(Err(RequestFailure::UnknownProtocol))
+            .is_err()
+        {
+            log::debug!(
+                target: LOG_TARGET,
+                "Unknown protocol {:?}. At the same time local \
+                 node is no longer interested in the result.",
+                protocol_name,
+            );
+        }
+    }
+
+    fn send_request_inner(
+        behaviour: &mut Behaviour<GenericCodec>,
+        pending_requests: &mut HashMap<ProtocolRequestId<OutboundRequestId>, PendingRequest>,
+        target: &PeerId,
+        protocol_name: ProtocolName,
+        request: Vec<u8>,
+        fallback_request: Option<(Vec<u8>, ProtocolName)>,
+        pending_response: oneshot::Sender<Result<(Vec<u8>, ProtocolName), RequestFailure>>,
+        connect: IfDisconnected,
+    ) {
+        if behaviour.is_connected(target) || connect.should_connect() {
+            // Convert Vec<u8> to WireMessage for GenericCodec
+            // Note: This is a compatibility layer since GenericCodec expects WireMessage
+            // We use default MessageContext for now
+            let wire_message = WireMessage {
+                context: MessageContext {
+                    message_type: MessageType::Computation,
+                    protocol_id: 0,
+                },
+                payload: request,
+                is_broadcast: false,
+            };
+            let request_id = behaviour.send_request(target, wire_message);
+            let prev_req_id = pending_requests.insert(
+                (protocol_name.clone(), request_id).into(),
+                PendingRequest {
+                    started_at: Instant::now(),
+                    response_tx: Some(pending_response),
+                    fallback_request,
+                },
+            );
+            debug_assert!(prev_req_id.is_none(), "Expect request id to be unique.");
+        } else if pending_response
+            .send(Err(RequestFailure::NotConnected))
+            .is_err()
+        {
+            log::debug!(
+                target: LOG_TARGET,
+                "Not connected to peer {:?}. At the same time local \
+                 node is no longer interested in the result.",
+                target,
+            );
+        }
+    }
+
+    /// Legacy method for backward compatibility - sends a request with WireMessage support.
+    pub fn send_request_with_context(
+        &mut self,
+        target: &PeerId,
         protocol_name: &str,
         ctx: MessageContext,
         payload: Vec<u8>,
-        pending_response: mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>,
+        is_broadcast: bool,
+        mut pending_response: futures::channel::mpsc::Sender<
+            Result<(PeerId, Vec<u8>), RequestFailure>,
+        >,
         connect: IfDisconnected,
     ) {
-        self.send_request_message(
-            target,
-            protocol_name,
-            WireMessage {
-                is_broadcast: false,
-                payload,
-                context: ctx,
-            },
-            Some(pending_response),
-            connect,
-        );
+        // Convert protocol_name to ProtocolName
+        let protocol_name_proto = ProtocolName::from(protocol_name.to_string());
+        let target_clone = *target;
+
+        // Convert mpsc::Sender to oneshot::Sender by creating a bridge
+        let (tx, rx) = oneshot::channel();
+        let mut pending_response_clone = pending_response.clone();
+
+        // Spawn a task to bridge the response
+        tokio::spawn(async move {
+            if let Ok(result) = rx.await {
+                match result {
+                    Ok((payload, _protocol)) => {
+                        let _ = pending_response_clone.try_send(Ok((target_clone, payload)));
+                    }
+                    Err(e) => {
+                        let _ = pending_response_clone.try_send(Err(e));
+                    }
+                }
+            }
+        });
+
+        // Create WireMessage
+        let wire_message = WireMessage {
+            context: ctx,
+            payload,
+            is_broadcast,
+        };
+
+        if let Some(ProtocolDetails { behaviour, .. }) =
+            self.protocols.get_mut(protocol_name_proto.deref())
+        {
+            if behaviour.is_connected(target) || connect.should_connect() {
+                let request_id = behaviour.send_request(target, wire_message);
+                let prev_req_id = self.pending_requests.insert(
+                    (protocol_name_proto.clone(), request_id).into(),
+                    PendingRequest {
+                        started_at: Instant::now(),
+                        response_tx: Some(tx),
+                        fallback_request: None,
+                    },
+                );
+                debug_assert!(prev_req_id.is_none(), "Expect request id to be unique.");
+            } else {
+                let _ = pending_response.try_send(Err(RequestFailure::NotConnected));
+            }
+        } else {
+            let _ = pending_response.try_send(Err(RequestFailure::UnknownProtocol));
+        }
     }
 
+    /// Legacy method for backward compatibility - broadcasts a message with WireMessage support.
     pub fn broadcast_message(
         &mut self,
         targets: impl Iterator<Item = PeerId>,
         protocol_name: &str,
         ctx: MessageContext,
         payload: Vec<u8>,
-        pending_response: Option<mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>>,
+        mut pending_response: Option<
+            futures::channel::mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>,
+        >,
         connect: IfDisconnected,
     ) {
         for target in targets {
-            self.send_request_message(
+            let response_sender = if let Some(ref mut sender) = pending_response {
+                sender.clone()
+            } else {
+                // No caller feedback requested, but the request still must be sent.
+                // Use a best-effort sink and ignore returned outcomes.
+                let (dummy_tx, _dummy_rx) = futures::channel::mpsc::channel(1);
+                dummy_tx
+            };
+            self.send_request_with_context(
                 &target,
                 protocol_name,
-                WireMessage {
-                    is_broadcast: true,
-                    payload: payload.clone(),
-                    context: ctx,
-                },
-                pending_response.clone(),
+                ctx,
+                payload.clone(),
+                true,
+                response_sender,
                 connect,
             );
-        }
-    }
-
-    fn send_request_message(
-        &mut self,
-        target: &PeerId,
-        protocol_name: &str,
-        message: WireMessage,
-        pending_response: Option<mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>>,
-        connect: IfDisconnected,
-    ) {
-        if let Some(ProtocolDetails { behaviour, .. }) = self.protocols.get_mut(protocol_name) {
-            if behaviour.is_connected(target) || connect.should_connect() {
-                let request_id = behaviour.send_request(target, message);
-                let prev_req_id = self.pending_requests.insert(
-                    (protocol_name.to_string().into(), request_id).into(),
-                    PendingRequest {
-                        started_at: Instant::now(),
-                        response_tx: pending_response,
-                    },
-                );
-                debug_assert!(prev_req_id.is_none(), "Expect request id to be unique.");
-            } else {
-                if let Some(mut pending_response) = pending_response {
-                    if pending_response
-                        .try_send(Err(RequestFailure::NotConnected))
-                        .is_err()
-                    {
-                        debug!(
-                            target: LOG_TARGET,
-                            "Not connected to peer {:?}. At the same time local \
-                             node is no longer interested in the result.",
-                            target,
-                        );
-                    };
-                }
-            }
-        } else {
-            if let Some(mut pending_response) = pending_response {
-                if pending_response
-                    .try_send(Err(RequestFailure::UnknownProtocol))
-                    .is_err()
-                {
-                    debug!(
-                        target: LOG_TARGET,
-                        "Unknown protocol {:?}. At the same time local \
-                         node is no longer interested in the result.",
-                        protocol_name,
-                    );
-                };
-            }
         }
     }
 }
@@ -578,12 +762,7 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
     }
 
     fn on_swarm_event(&mut self, event: FromSwarm) {
-        // Forward the event to all protocols
-        // Note: FromSwarm events can be forwarded to multiple behaviours
-        // However, some events contain references that cannot be used multiple times
-        // For now, we forward to the first protocol only to avoid issues
-        // The swarm should distribute events to all behaviours automatically
-        if let Some(ProtocolDetails { behaviour, .. }) = self.protocols.values_mut().next() {
+        for ProtocolDetails { behaviour, .. } in self.protocols.values_mut() {
             behaviour.on_swarm_event(event);
         }
     }
@@ -596,9 +775,9 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
     ) {
         let p_name = event.0;
         if let Some(ProtocolDetails { behaviour, .. }) = self.protocols.get_mut(p_name.as_str()) {
-            behaviour.on_connection_handler_event(peer_id, connection_id, event.1);
+            return behaviour.on_connection_handler_event(peer_id, connection_id, event.1);
         } else {
-            warn!(
+            log::warn!(
                 target: LOG_TARGET,
                 "on_connection_handler_event: no request-response instance registered for protocol {:?}",
                 p_name
@@ -617,104 +796,43 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
                     let Some(ProtocolDetails { request_timeout, .. }) =
                         self.protocols.get(&id.protocol)
                     else {
-                        warn!(
-                            target: LOG_TARGET,
-                            "Request {id:?} has no protocol registered.",
-                        );
+						log::warn!(
+							target: LOG_TARGET,
+							"Request {id:?} has no protocol registered.",
+						);
 
-                        if let Some(mut response_tx) = req.response_tx.take() {
-                            if response_tx
-                                .try_send(Err(RequestFailure::UnknownProtocol))
-                                .is_err()
-                            {
-                                debug!(
-                                    target: LOG_TARGET,
-                                    "Request {id:?} has no protocol registered. At the same time local node is no longer interested in the result.",
-                                );
-                            }
-                        }
+						if let Some(response_tx) = req.response_tx.take() {
+							if response_tx.send(Err(RequestFailure::UnknownProtocol)).is_err() {
+								log::debug!(
+									target: LOG_TARGET,
+									"Request {id:?} has no protocol registered. At the same time local node is no longer interested in the result.",
+								);
+							}
+						}
                         return false;
                     };
 
                     let elapsed = req.started_at.elapsed();
                     if elapsed > *request_timeout {
-                        debug!(
-                            target: LOG_TARGET,
-                            "Request {id:?} force detected as timeout.",
-                        );
+						log::debug!(
+							target: LOG_TARGET,
+							"Request {id:?} force detected as timeout.",
+						);
 
-                        if let Some(mut response_tx) = req.response_tx.take() {
-                            if response_tx
-                                .try_send(Err(RequestFailure::Network(
-                                    OutboundFailure::Timeout,
-                                )))
-                                .is_err()
-                            {
-                                debug!(
-                                    target: LOG_TARGET,
-                                    "Request {id:?} force detected as timeout. At the same time local node is no longer interested in the result.",
-                                );
-                            }
-                        }
+						if let Some(response_tx) = req.response_tx.take() {
+							if response_tx.send(Err(RequestFailure::Network(OutboundFailure::Timeout))).is_err() {
+								log::debug!(
+									target: LOG_TARGET,
+									"Request {id:?} force detected as timeout. At the same time local node is no longer interested in the result.",
+								);
+							}
+						}
 
                         false
                     } else {
                         true
                     }
                 });
-            }
-
-            if let Some(message_request) = self.message_request.take() {
-                let MessageRequest {
-                    peer,
-                    request_id,
-                    request,
-                    channel,
-                    protocol,
-                    resp_builder,
-                } = message_request;
-
-                let (tx, rx) = oneshot::channel();
-
-                // Submit the request to the "response builder" passed by the user at
-                // initialization.
-                if let Some(mut resp_builder) = resp_builder {
-                    // If the response builder is too busy, silently drop `tx`. This
-                    // will be reported by the corresponding `RequestResponse` through
-                    // an `InboundFailure::Omission` event.
-                    if let Err(e) = resp_builder.try_send(IncomingRequest {
-                        peer_id: peer,
-                        peer_index: 0,
-                        is_broadcast: request.is_broadcast,
-                        payload: request.payload,
-                        context: request.context,
-                        pending_response: tx,
-                    }) {
-                        error!("Failed to send incoming request to response builder: {e}");
-                    };
-                }
-
-                let protocol = Cow::from(protocol);
-                self.pending_responses.push(Box::pin(async move {
-                    // The `tx` created above can be dropped if we are not capable of
-                    // processing this request, which is reflected as a
-                    // `InboundFailure::Omission` event.
-                    if let Ok(response) = rx.await {
-                        Some(RequestProcessingOutcome {
-                            peer,
-                            request_id,
-                            protocol,
-                            inner_channel: channel,
-                            response,
-                        })
-                    } else {
-                        None
-                    }
-                }));
-
-                // This `continue` makes sure that `pending_responses` gets polled
-                // after we have added the new element.
-                continue 'poll_all;
             }
 
             // Poll to see if any response is ready to be sent back.
@@ -731,6 +849,8 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
                         },
                 } = match outcome {
                     Some(outcome) => outcome,
+                    // The response builder was too busy or handling the request failed. This is
+                    // later on reported as a `InboundFailure::Omission`.
                     None => continue,
                 };
 
@@ -738,21 +858,17 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
                     if let Some(ProtocolDetails { behaviour, .. }) =
                         self.protocols.get_mut(&*protocol_name)
                     {
-                        debug!(
-                            target: LOG_TARGET,
-                            "send response to {peer} ({protocol_name:?}), {} bytes",
-                            payload.len()
-                        );
+                        log::trace!(target: LOG_TARGET, "send response to {peer} ({protocol_name:?}), {} bytes", payload.len());
 
                         if behaviour.send_response(inner_channel, Ok(payload)).is_err() {
                             // Note: Failure is handled further below when receiving
                             // `InboundFailure` event from request-response [`Behaviour`].
-                            debug!(
+                            log::debug!(
                                 target: LOG_TARGET,
                                 "Failed to send response for {:?} on protocol {:?} due to a \
                                  timeout or due to the connection to the peer being closed. \
                                  Dropping response",
-                                request_id, protocol_name
+                                request_id, protocol_name,
                             );
                         } else if let Some(sent_feedback) = sent_feedback {
                             self.send_feedback
@@ -761,6 +877,8 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
                     }
                 }
             }
+
+            let mut fallback_requests = vec![];
 
             // Poll request-responses protocols.
             for (
@@ -772,189 +890,265 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
                 },
             ) in &mut self.protocols
             {
-                loop {
-                    match behaviour.poll(cx) {
-                        Poll::Ready(ToSwarm::GenerateEvent(ev)) => {
-                            match ev {
-                                // Received a request from a remote.
-                                RequestResponseEvent::Message {
-                                    peer,
-                                    message:
-                                        Message::Request {
-                                            request_id,
-                                            request,
-                                            channel,
-                                            ..
-                                        },
-                                } => {
-                                    self.pending_responses_arrival_time.insert(
-                                        (protocol.clone(), request_id.clone()).into(),
-                                        Instant::now(),
-                                    );
+                'poll_protocol: while let Poll::Ready(ev) = behaviour.poll(cx) {
+                    let ev = match ev {
+                        // Main events we are interested in.
+                        ToSwarm::GenerateEvent(ev) => ev,
 
-                                    // Save the Future-like state with params to poll `get_peer_reputation`
-                                    // and to continue processing the request once we get the reputation of
-                                    // the peer.
-                                    // We already have inbound_queue from the loop, so we can use it directly
-                                    self.message_request = Some(MessageRequest {
+                        // Other events generated by the underlying behaviour are transparently
+                        // passed through.
+                        ToSwarm::Dial { opts } => {
+                            if opts.get_peer_id().is_none() {
+                                log::error!(
+                                    target: LOG_TARGET,
+                                    "The request-response isn't supposed to start dialing addresses"
+                                );
+                            }
+                            return Poll::Ready(ToSwarm::Dial { opts });
+                        }
+                        event => {
+                            return Poll::Ready(
+                                event
+                                    .map_in(|event| ((*protocol).to_string(), event))
+                                    .map_out(|_| {
+                                        unreachable!(
+                                            "`GenerateEvent` is handled in a branch above; qed"
+                                        )
+                                    }),
+                            );
+                        }
+                    };
+
+                    match ev {
+                        // Received a request from a remote.
+                        request_response::Event::Message {
+                            peer,
+                            message:
+                                Message::Request {
+                                    request_id,
+                                    request,
+                                    channel,
+                                    ..
+                                },
+                        } => {
+                            self.pending_responses_arrival_time
+                                .insert((protocol.clone(), request_id).into(), Instant::now());
+
+                            let reputation = self.peer_store.peer_reputation(&peer);
+
+                            if reputation < BANNED_THRESHOLD {
+                                log::debug!(
+                                    target: LOG_TARGET,
+                                    "Cannot handle requests from a node with a low reputation {}: {}",
+                                    peer,
+                                    reputation,
+                                );
+                                continue 'poll_protocol;
+                            }
+
+                            let (tx, rx) = oneshot::channel();
+
+                            // Submit the request to the "response builder" passed by the user at
+                            // initialization.
+                            if let Some(resp_builder) = inbound_queue {
+                                // If the response builder is too busy, silently drop `tx`. This
+                                // will be reported by the corresponding request-response
+                                // [`Behaviour`] through an `InboundFailure::Omission` event.
+                                // Note that we use `async_channel::bounded` and not `mpsc::channel`
+                                // because the latter allocates an extra slot for every cloned
+                                // sender.
+                                let WireMessage {
+                                    context,
+                                    payload,
+                                    is_broadcast,
+                                } = request;
+                                let _ = resp_builder.try_send(IncomingRequest {
+                                    context,
+                                    peer,
+                                    peer_id: peer,
+                                    is_broadcast,
+                                    peer_index: 0,
+                                    payload,
+                                    pending_response: tx,
+                                });
+                            } else {
+                                debug_assert!(false, "Received message on outbound-only protocol.");
+                            }
+
+                            let protocol = protocol.clone();
+
+                            self.pending_responses.push(Box::pin(async move {
+                                // The `tx` created above can be dropped if we are not capable of
+                                // processing this request, which is reflected as a
+                                // `InboundFailure::Omission` event.
+                                rx.await.map_or(None, |response| {
+                                    Some(RequestProcessingOutcome {
                                         peer,
                                         request_id,
-                                        request,
-                                        channel,
-                                        protocol: protocol.to_string(),
-                                        resp_builder: inbound_queue.clone(),
-                                    });
+                                        protocol,
+                                        inner_channel: channel,
+                                        response,
+                                    })
+                                })
+                            }));
 
-                                    // This `continue` makes sure that `message_request` gets polled
-                                    // after we have added the new element.
-                                    continue 'poll_all;
-                                }
+                            // This `continue` makes sure that `pending_responses` gets polled
+                            // after we have added the new element.
+                            continue 'poll_all;
+                        }
 
-                                // Received a response from a remote to one of our requests.
-                                RequestResponseEvent::Message {
-                                    peer,
-                                    message:
-                                        Message::Response {
-                                            request_id,
-                                            response,
-                                        },
+                        // Received a response from a remote to one of our requests.
+                        request_response::Event::Message {
+                            peer,
+                            message:
+                                Message::Response {
+                                    request_id,
+                                    response,
+                                },
+                            ..
+                        } => {
+                            let (started, delivered) = match self
+                                .pending_requests
+                                .remove(&(protocol.clone(), request_id).into())
+                            {
+                                Some(PendingRequest {
+                                    started_at,
+                                    response_tx: Some(response_tx),
                                     ..
-                                } => {
-                                    let (started, delivered) = match self
-                                        .pending_requests
-                                        .remove(&(protocol.clone(), request_id).into())
-                                    {
-                                        Some(PendingRequest {
-                                            started_at,
-                                            response_tx: Some(mut response_tx),
-                                        }) => {
-                                            debug!(
-                                                target: LOG_TARGET,
-                                                "received response from {peer} ({protocol:?}), {} bytes",
-                                                response.as_ref().map_or(0usize, |response| response.len()),
-                                            );
+                                }) => {
+                                    log::trace!(
+                                        target: LOG_TARGET,
+                                        "received response from {peer} ({protocol:?}), {} bytes",
+                                        response.as_ref().map_or(0usize, |response| response.len()),
+                                    );
 
-                                            let delivered = response_tx
-                                                .try_send(
-                                                    response
-                                                        .map(|r| (peer.clone(), r))
-                                                        .map_err(|()| RequestFailure::Refused),
-                                                )
-                                                .map_err(|_| RequestFailure::Obsolete);
-                                            (started_at, delivered)
-                                        }
-                                        Some(PendingRequest {
-                                            started_at,
-                                            response_tx: None,
-                                        }) => {
-                                            // Response channel was already taken (e.g., due to timeout)
-                                            (started_at, Ok(()))
-                                        }
-                                        None => {
-                                            warn!(
+                                    let delivered = response_tx
+                                        .send(
+                                            response
+                                                .map_err(|()| RequestFailure::Refused)
+                                                .map(|resp| (resp, protocol.clone())),
+                                        )
+                                        .map_err(|_| RequestFailure::Obsolete);
+                                    (started_at, delivered)
+                                }
+                                _ => {
+                                    log::debug!(
+                                        target: LOG_TARGET,
+                                        "Received `RequestResponseEvent::Message` with unexpected request id {:?} from {:?}",
+                                        request_id,
+                                        peer,
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            let out = Event::RequestFinished {
+                                peer,
+                                protocol: protocol.clone(),
+                                duration: started.elapsed(),
+                                result: delivered,
+                            };
+
+                            return Poll::Ready(ToSwarm::GenerateEvent(out));
+                        }
+
+                        // One of our requests has failed.
+                        request_response::Event::OutboundFailure {
+                            peer,
+                            request_id,
+                            error,
+                            ..
+                        } => {
+                            let error = OutboundFailure::from(error);
+                            let started = match self
+                                .pending_requests
+                                .remove(&(protocol.clone(), request_id).into())
+                            {
+                                Some(PendingRequest {
+                                    started_at,
+                                    response_tx: Some(response_tx),
+                                    fallback_request,
+                                }) => {
+                                    // Try using the fallback request if the protocol was not
+                                    // supported.
+                                    if matches!(error, OutboundFailure::UnsupportedProtocols) {
+                                        if let Some((fallback_request, fallback_protocol)) =
+                                            fallback_request
+                                        {
+                                            log::trace!(
                                                 target: LOG_TARGET,
-                                                "Received `RequestResponseEvent::Message` with unexpected request id {:?} from {:?}",
+                                                "Request with id {:?} failed. Trying the fallback protocol. {}",
                                                 request_id,
+                                                fallback_protocol.deref()
+                                            );
+                                            fallback_requests.push((
                                                 peer,
-                                            );
-                                            debug_assert!(false);
+                                                fallback_protocol,
+                                                fallback_request,
+                                                response_tx,
+                                            ));
                                             continue;
                                         }
-                                    };
+                                    }
 
-                                    let out = Event::RequestFinished {
-                                        peer,
-                                        protocol: protocol.clone(),
-                                        duration: started.elapsed(),
-                                        result: delivered,
-                                    };
-
-                                    return Poll::Ready(ToSwarm::GenerateEvent(out));
-                                }
-
-                                // One of our requests has failed.
-                                RequestResponseEvent::OutboundFailure {
-                                    peer,
-                                    request_id,
-                                    error,
-                                    ..
-                                } => {
-                                    let outbound_error = OutboundFailure::from(error);
-                                    let started = match self
-                                        .pending_requests
-                                        .remove(&(protocol.clone(), request_id).into())
+                                    if response_tx
+                                        .send(Err(RequestFailure::Network(error.clone())))
+                                        .is_err()
                                     {
-                                        Some(PendingRequest {
-                                            started_at,
-                                            response_tx: Some(mut response_tx),
-                                        }) => {
-                                            if response_tx
-                                                .try_send(Err(RequestFailure::Network(
-                                                    outbound_error.clone(),
-                                                )))
-                                                .is_err()
-                                            {
-                                                debug!(
-                                                    target: LOG_TARGET,
-                                                    "Request with id {:?} failed. At the same time local \
-                                                     node is no longer interested in the result.",
-                                                    request_id,
-                                                );
-                                            }
-                                            started_at
-                                        }
-                                        Some(PendingRequest {
-                                            started_at,
-                                            response_tx: None,
-                                        }) => {
-                                            // Response channel was already taken (e.g., due to timeout)
-                                            started_at
-                                        }
-                                        None => {
-                                            warn!(
-                                                target: LOG_TARGET,
-                                                "Received `RequestResponseEvent::OutboundFailure` with unexpected request id {:?} error {:?} from {:?}",
-                                                request_id,
-                                                outbound_error,
-                                                peer
-                                            );
-                                            continue;
-                                        }
-                                    };
-
-                                    let out = Event::RequestFinished {
-                                        peer,
-                                        protocol: protocol.clone(),
-                                        duration: started.elapsed(),
-                                        result: Err(RequestFailure::Network(outbound_error)),
-                                    };
-
-                                    return Poll::Ready(ToSwarm::GenerateEvent(out));
+                                        log::debug!(
+                                            target: LOG_TARGET,
+                                            "Request with id {:?} failed. At the same time local \
+                                             node is no longer interested in the result.",
+                                            request_id,
+                                        );
+                                    }
+                                    started_at
                                 }
-
-                                // An inbound request failed, either while reading the request or due to
-                                // failing to send a response.
-                                RequestResponseEvent::InboundFailure {
-                                    peer,
-                                    request_id,
-                                    error,
-                                    ..
-                                } => {
-                                    self.pending_responses_arrival_time
-                                        .remove(&(protocol.clone(), request_id).into());
-                                    self.send_feedback
-                                        .remove(&(protocol.clone(), request_id).into());
-                                    let out = Event::InboundRequest {
-                                        peer,
-                                        protocol: protocol.clone(),
-                                        result: Err(ResponseFailure::Network(error.into())),
-                                    };
-                                    return Poll::Ready(ToSwarm::GenerateEvent(out));
+                                _ => {
+                                    log::debug!(
+                                        target: LOG_TARGET,
+                                        "Received `RequestResponseEvent::OutboundFailure` with unexpected request id {:?} error {:?} from {:?}",
+                                        request_id,
+                                        error,
+                                        peer
+                                    );
+                                    continue;
                                 }
+                            };
 
-                                // A response to an inbound request has been sent.
-                                RequestResponseEvent::ResponseSent { peer, request_id } => {
-                                    let arrival_time = self
+                            let out = Event::RequestFinished {
+                                peer,
+                                protocol: protocol.clone(),
+                                duration: started.elapsed(),
+                                result: Err(RequestFailure::Network(error)),
+                            };
+
+                            return Poll::Ready(ToSwarm::GenerateEvent(out));
+                        }
+
+                        // An inbound request failed, either while reading the request or due to
+                        // failing to send a response.
+                        request_response::Event::InboundFailure {
+                            request_id,
+                            peer,
+                            error,
+                            ..
+                        } => {
+                            self.pending_responses_arrival_time
+                                .remove(&(protocol.clone(), request_id).into());
+                            self.send_feedback
+                                .remove(&(protocol.clone(), request_id).into());
+                            let out = Event::InboundRequest {
+                                peer,
+                                protocol: protocol.clone(),
+                                result: Err(ResponseFailure::Network(error.into())),
+                            };
+                            return Poll::Ready(ToSwarm::GenerateEvent(out));
+                        }
+
+                        // A response to an inbound request has been sent.
+                        request_response::Event::ResponseSent { request_id, peer } => {
+                            let arrival_time = self
                                 .pending_responses_arrival_time
                                 .remove(&(protocol.clone(), request_id).into())
                                 .map(|t| t.elapsed())
@@ -966,66 +1160,41 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
 									 failed; qed.",
                                 );
 
-                                    if let Some(send_feedback) = self
-                                        .send_feedback
-                                        .remove(&(protocol.clone(), request_id).into())
-                                    {
-                                        let _ = send_feedback.send(());
-                                    }
-
-                                    let out = Event::InboundRequest {
-                                        peer,
-                                        protocol: protocol.clone(),
-                                        result: Ok(arrival_time),
-                                    };
-
-                                    return Poll::Ready(ToSwarm::GenerateEvent(out));
-                                }
+                            if let Some(send_feedback) = self
+                                .send_feedback
+                                .remove(&(protocol.clone(), request_id).into())
+                            {
+                                let _ = send_feedback.send(());
                             }
+
+                            let out = Event::InboundRequest {
+                                peer,
+                                protocol: protocol.clone(),
+                                result: Ok(arrival_time),
+                            };
+
+                            return Poll::Ready(ToSwarm::GenerateEvent(out));
                         }
-                        Poll::Ready(other) => {
-                            // Convert ToSwarm<request_response::Event, ...> to ToSwarm<Event, ...>
-                            // For non-GenerateEvent variants, we can forward them directly
-                            match other {
-                                ToSwarm::Dial { opts } => {
-                                    return Poll::Ready(ToSwarm::Dial { opts });
-                                }
-                                ToSwarm::CloseConnection {
-                                    peer_id,
-                                    connection,
-                                } => {
-                                    return Poll::Ready(ToSwarm::CloseConnection {
-                                        peer_id,
-                                        connection,
-                                    });
-                                }
-                                ToSwarm::NotifyHandler {
-                                    peer_id,
-                                    handler,
-                                    event,
-                                } => {
-                                    // event is OutboundMessage<GenericCodec>, but we need (String, OutboundMessage<GenericCodec>)
-                                    // We need to wrap it with the protocol name
-                                    return Poll::Ready(ToSwarm::NotifyHandler {
-                                        peer_id,
-                                        handler,
-                                        event: (protocol.to_string(), event),
-                                    });
-                                }
-                                ToSwarm::GenerateEvent(_) => {
-                                    // This should have been handled above
-                                    unreachable!();
-                                }
-                                _ => {
-                                    // Handle any other ToSwarm variants
-                                    return Poll::Ready(other.map_in(|event| (protocol.to_string(), event)).map_out(|_| {
-                                        unreachable!("`GenerateEvent` is handled in a branch above; qed")
-                                    }));
-                                }
-                            }
-                        }
-                        Poll::Pending => break,
-                    }
+                    };
+                }
+            }
+
+            // Send out fallback requests.
+            for (peer, protocol, request, pending_response) in fallback_requests.drain(..) {
+                if let Some(ProtocolDetails { behaviour, .. }) = self.protocols.get_mut(&protocol) {
+                    Self::send_request_inner(
+                        behaviour,
+                        &mut self.pending_requests,
+                        &peer,
+                        protocol,
+                        request,
+                        None,
+                        pending_response,
+                        // We can error if not connected because the
+                        // previous attempt would have tried to establish a
+                        // connection already or errored and we wouldn't have gotten here.
+                        IfDisconnected::ImmediateError,
+                    );
                 }
             }
 
@@ -1035,28 +1204,11 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
 }
 
 /// Error when registering a protocol.
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RegisterError {
     /// A protocol has been specified multiple times.
     #[error("{0}")]
-    DuplicateProtocol(Cow<'static, str>),
-}
-
-/// Error in a request.
-#[derive(thiserror::Error, Debug)]
-#[allow(missing_docs)]
-pub enum RequestFailure {
-    #[error("We are not currently connected to the requested peer.")]
-    NotConnected,
-    #[error("Given protocol hasn't been registered.")]
-    UnknownProtocol,
-    #[error("Remote has closed the substream before answering, thereby signaling that it considers the request as valid, but refused to answer it.")]
-    Refused,
-    #[error("The remote replied, but the local node is no longer interested in the response.")]
-    Obsolete,
-    /// Problem on the network.
-    #[error("Problem on the network: {0}")]
-    Network(OutboundFailure),
+    DuplicateProtocol(ProtocolName),
 }
 
 /// Error when processing a request sent by a remote.

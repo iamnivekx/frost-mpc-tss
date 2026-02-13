@@ -46,6 +46,7 @@ thiserror = { version = "2.0.17" }
 clap = { version = "4.5.50", features = ["derive", "env"] }
 
 # Tracing & logging
+log = { version = "0.4" }
 tracing = { version = "0.1.41" }
 tracing-error = { version = "0.2.0" }
 tracing-otel-extra = { version = "0.31.0", features = ["logger", "env"] }
@@ -88,6 +89,11 @@ zeroize = { version = "1.5.4" }
 # Collections
 smallvec = { version = "1.8.0" }
 arrayvec = { version = "0.7.6" }
+linked_hash_set = "0.1"
+
+# Networking utilities
+ip_network = "0.4"
+futures-timer = "3.0"
 
 # Codec
 parity-scale-codec = { version = "3.1.2" }

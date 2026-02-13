@@ -118,7 +118,9 @@ impl NetworkWorker {
                 match Behaviour::new(&keypair, request_response_protocols, params.clone()) {
                     Ok(b) => b,
                     Err(request_responses::RegisterError::DuplicateProtocol(proto)) => {
-                        return Err(Error::DuplicateBroadcastProtocol { protocol: proto });
+                        return Err(Error::DuplicateBroadcastProtocol {
+                            protocol: Cow::Owned(proto.to_string()),
+                        });
                     }
                 }
             };
@@ -222,6 +224,13 @@ impl NetworkWorker {
                                         peer,
                                         duration,
                                         result
+                                    );
+                                }
+                                request_responses::Event::ReputationChanges { peer, changes } => {
+                                    debug!(
+                                        "Reputation changes for peer {:?}: {:?}",
+                                        peer,
+                                        changes
                                     );
                                 }
                             }

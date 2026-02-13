@@ -214,11 +214,19 @@ impl KeyGen {
         }
 
         // Receive round 1 packages until we have all expected ones
+        let mut deferred_round2_requests = Vec::new();
         while round1_packages_all.len() < max_signers as usize {
             let req = incoming
                 .recv()
                 .await
                 .map_err(|e| anyhow!("error receiving message: {e}"))?;
+
+            // Round 1 packages are broadcast. Direct messages belong to Round 2 and can
+            // legitimately arrive early on asynchronous networks.
+            if req.to.is_some() {
+                deferred_round2_requests.push(req);
+                continue;
+            }
 
             let payload: Vec<u8> = serde_ipld_dagcbor::from_slice(&req.payload).map_err(|e| {
                 anyhow!(
@@ -299,7 +307,7 @@ impl KeyGen {
                 .map_err(|e| anyhow!("failed to encode round2 package: {e}"))?;
             let (tx2, _rx2) = futures::channel::oneshot::channel();
             outgoing
-            .send(mpc_service::OutgoingResponse {
+                .send(mpc_service::OutgoingResponse {
                     body: payload_cbor,
                     to: Some(*recipient_u16),
                     sent_feedback: Some(tx2),
@@ -313,29 +321,37 @@ impl KeyGen {
         let mut round2_packages = BTreeMap::new();
         let mut received_senders = BTreeSet::new();
 
+        let mut deferred_iter = deferred_round2_requests.into_iter();
         while round2_packages.len() < (max_signers - 1) as usize {
-            let req = incoming
-                .recv()
-                .await
-                .map_err(|e| anyhow!("error receiving message: {e}"))?;
-            // Only process messages sent to us (or broadcast messages)
-            if req.to.is_none() || req.to == Some(identifier) {
-                let sender_id = Identifier::try_from(req.from)
-                    .map_err(|e| anyhow!("invalid sender identifier: {e}"))?;
+            let req = if let Some(req) = deferred_iter.next() {
+                req
+            } else {
+                incoming
+                    .recv()
+                    .await
+                    .map_err(|e| anyhow!("error receiving message: {e}"))?
+            };
 
-                // Skip if we already received a package from this sender
-                if received_senders.contains(&sender_id) {
-                    continue;
-                }
-
-                let payload: Vec<u8> = serde_ipld_dagcbor::from_slice(&req.payload)
-                    .map_err(|e| anyhow!("failed to decode round2 package: {e}"))?;
-                let round2_pkg = round2::Package::<C>::deserialize(&payload)
-                    .map_err(|e| anyhow!("failed to deserialize round2 package: {e}"))?;
-
-                round2_packages.insert(sender_id, round2_pkg);
-                received_senders.insert(sender_id);
+            // Round 2 uses direct messages only.
+            if req.to != Some(identifier) {
+                continue;
             }
+
+            let sender_id =
+                Identifier::try_from(req.from).map_err(|e| anyhow!("invalid sender identifier: {e}"))?;
+
+            // Skip if we already received a package from this sender
+            if received_senders.contains(&sender_id) {
+                continue;
+            }
+
+            let payload: Vec<u8> = serde_ipld_dagcbor::from_slice(&req.payload)
+                .map_err(|e| anyhow!("failed to decode round2 package: {e}"))?;
+            let round2_pkg = round2::Package::<C>::deserialize(&payload)
+                .map_err(|e| anyhow!("failed to deserialize round2 package: {e}"))?;
+
+            round2_packages.insert(sender_id, round2_pkg);
+            received_senders.insert(sender_id);
         }
 
         println!(

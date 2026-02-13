@@ -1,11 +1,11 @@
 use crate::{request_responses, RoomId};
 use anyhow::anyhow;
-use futures::channel::mpsc;
 use libp2p::{
     identity::{ed25519, Keypair},
     multiaddr, Multiaddr, PeerId,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use std::{
     error::Error,
     fmt, fs, io,
@@ -15,6 +15,24 @@ use std::{
     str::FromStr,
 };
 use zeroize::Zeroize;
+
+/// Default timeout for idle connections of 10 seconds is good enough for most networks.
+pub const DEFAULT_IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum number of locally kept Kademlia provider keys.
+///
+/// 10000 keys is enough for a testnet with fast runtime (1-minute epoch) and 13 parachains.
+pub const KADEMLIA_MAX_PROVIDER_KEYS: usize = 10000;
+
+/// Time to keep Kademlia content provider records.
+///
+/// 10 h is enough time to keep the parachain bootnode record for two 4-hour epochs.
+pub const KADEMLIA_PROVIDER_RECORD_TTL: Duration = Duration::from_secs(10 * 3600);
+
+/// Interval of republishing Kademlia provider records.
+///
+/// 3.5 h means we refresh next epoch provider record 30 minutes before next 4-hour epoch comes.
+pub const KADEMLIA_PROVIDER_REPUBLISH_INTERVAL: Duration = Duration::from_secs(12600);
 
 /// Network initialization parameters.
 #[derive(Clone)]
@@ -43,7 +61,7 @@ pub struct RoomConfig {
     pub boot_nodes: Vec<MultiaddrWithPeerId>,
 
     /// Channel on which the networking service will send incoming messages.
-    pub inbound_queue: Option<mpsc::Sender<request_responses::IncomingRequest>>,
+    pub inbound_queue: Option<async_channel::Sender<request_responses::IncomingRequest>>,
 }
 
 impl RoomConfig {
@@ -54,10 +72,10 @@ impl RoomConfig {
     ) -> (
         RoomId,
         Self,
-        mpsc::Receiver<request_responses::IncomingRequest>,
+        async_channel::Receiver<request_responses::IncomingRequest>,
     ) {
         let id = RoomId::from(name);
-        let (tx, rx) = mpsc::channel(max_size);
+        let (tx, rx) = async_channel::bounded(max_size);
         let cfg = Self {
             id,
             max_size,

@@ -172,6 +172,8 @@ impl KeySign {
         // Receive commitments from all other participants
         let mut commitments_map = BTreeMap::new();
         commitments_map.insert(identifier_id, commitments);
+        use frost_core::round2::SignatureShare;
+        let mut deferred_signature_shares = BTreeMap::new();
 
         // Create a set of expected participant identifiers for validation
         let expected_participants: BTreeSet<Identifier<C>> = signing_participants
@@ -208,28 +210,53 @@ impl KeySign {
                     signing_participants
                 ));
             }
+            let payload: Vec<u8> = serde_ipld_dagcbor::from_slice(&req.payload)
+                .map_err(|e| anyhow!("failed to decode commitments: {e}"))?;
 
-            // Skip if we already received a commitment from this participant
+            // If commitment from this sender is already collected, this can be an early round2 share.
             if received_participants.contains(&sender_id) {
-                println!(
-                    "Round 1: Duplicate commitment from participant {}, skipping",
-                    req.from
-                );
+                if let Ok(sig_share) = SignatureShare::<C>::deserialize(&payload) {
+                    deferred_signature_shares
+                        .entry(sender_id)
+                        .or_insert(sig_share);
+                    println!(
+                        "Round 1: Buffered early signature share from participant {}",
+                        req.from
+                    );
+                } else {
+                    println!(
+                        "Round 1: Duplicate commitment from participant {}, skipping",
+                        req.from
+                    );
+                }
                 continue;
             }
 
             println!("Round 1: Received commitment from participant {}", req.from);
-            let payload: Vec<u8> = serde_ipld_dagcbor::from_slice(&req.payload)
-                .map_err(|e| anyhow!("failed to decode commitments: {e}"))?;
-            let comms = SigningCommitments::<C>::deserialize(&payload).map_err(|e| {
-                anyhow!(
-                    "failed to deserialize commitments from participant {}: {e}",
-                    req.from
-                )
-            })?;
-
-            commitments_map.insert(sender_id, comms);
-            received_participants.insert(sender_id);
+            match SigningCommitments::<C>::deserialize(&payload) {
+                Ok(comms) => {
+                    commitments_map.insert(sender_id, comms);
+                    received_participants.insert(sender_id);
+                }
+                Err(commit_err) => {
+                    // A round2 share can arrive early on asynchronous networks.
+                    if let Ok(sig_share) = SignatureShare::<C>::deserialize(&payload) {
+                        deferred_signature_shares
+                            .entry(sender_id)
+                            .or_insert(sig_share);
+                        println!(
+                            "Round 1: Buffered early signature share from participant {}",
+                            req.from
+                        );
+                        continue;
+                    }
+                    return Err(anyhow!(
+                        "failed to deserialize commitments from participant {}: {}",
+                        req.from,
+                        commit_err
+                    ));
+                }
+            }
         }
 
         // Verify we have commitments from all expected participants
@@ -255,7 +282,6 @@ impl KeySign {
             .map_err(|e| anyhow!("failed to generate signature share: {e}"))?;
 
         // Send signature share
-        use frost_core::round2::SignatureShare;
         let sig_share_payload = signature_share.serialize();
         let sig_share_payload_cbor = serde_ipld_dagcbor::to_vec(&sig_share_payload)
             .map_err(|e| anyhow!("failed to encode signature share: {e}"))?;
@@ -282,6 +308,14 @@ impl KeySign {
 
         let mut received_signature_participants = BTreeSet::new();
         received_signature_participants.insert(identifier_id);
+        for (sender_id, sig_share) in deferred_signature_shares {
+            if expected_participants.contains(&sender_id)
+                && !received_signature_participants.contains(&sender_id)
+            {
+                signature_shares.insert(sender_id, sig_share);
+                received_signature_participants.insert(sender_id);
+            }
+        }
 
         while received_signature_participants.len() < signing_participants.len() {
             println!(
@@ -321,12 +355,23 @@ impl KeySign {
             );
             let payload: Vec<u8> = serde_ipld_dagcbor::from_slice(&req.payload)
                 .map_err(|e| anyhow!("failed to decode signature share: {e}"))?;
-            let sig_share = SignatureShare::<C>::deserialize(&payload).map_err(|e| {
-                anyhow!(
-                    "failed to deserialize signature share from participant {}: {e}",
-                    req.from
-                )
-            })?;
+            let sig_share = match SignatureShare::<C>::deserialize(&payload) {
+                Ok(sig_share) => sig_share,
+                Err(e) => {
+                    // Late round1 commitment can still be in flight; ignore it.
+                    if SigningCommitments::<C>::deserialize(&payload).is_ok() {
+                        println!(
+                            "Round 2: Ignoring late commitment payload from participant {}",
+                            req.from
+                        );
+                        continue;
+                    }
+                    return Err(anyhow!(
+                        "failed to deserialize signature share from participant {}: {e}",
+                        req.from
+                    ));
+                }
+            };
 
             signature_shares.insert(sender_id, sig_share);
             received_signature_participants.insert(sender_id);

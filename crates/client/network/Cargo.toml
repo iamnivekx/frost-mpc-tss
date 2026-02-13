@@ -12,6 +12,7 @@ async-channel = { workspace = true }
 tokio = { workspace = true }
 
 # Logging
+log = { workspace = true }
 tracing = { workspace = true }
 
 # Error handling
@@ -39,6 +40,11 @@ uuid = { workspace = true }
 # Collections
 smallvec = { workspace = true }
 arrayvec = { workspace = true }
+linked_hash_set = { workspace = true }
+
+# Networking utilities
+ip_network = { workspace = true }
+futures-timer = { workspace = true }
 
 # Cryptography
 blake3 = { workspace = true }

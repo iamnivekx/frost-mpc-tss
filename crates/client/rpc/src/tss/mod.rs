@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use futures::channel::oneshot;
 use mpc_network::RoomId;
 use mpc_rpc_api::{tss::error::Error as TssError, RpcResult, TssApiServer};
-use mpc_tss::{PublicKey, Signature};
-use std::io::{BufWriter, Write};
+use mpc_tss::{
+    encode_keygen_payload, encode_sign_payload, PublicKey, Signature, DEFAULT_TRANSPORT_ROOM,
+};
 use tracing::debug;
 
 pub struct Tss {
@@ -22,11 +23,10 @@ impl TssApiServer for Tss {
         let mut rt_service = self.rt_service.clone();
 
         let (tx, rx) = oneshot::channel();
-        let mut io = BufWriter::new(vec![]);
-        let mut buffer = unsigned_varint::encode::u16_buffer();
-        let _ = io.write_all(unsigned_varint::encode::u16(t, &mut buffer));
-        let room_id = RoomId::from(room);
-        let payload = io.buffer().to_vec();
+        let wallet_id = room;
+        let room_id = RoomId::from(DEFAULT_TRANSPORT_ROOM.to_owned());
+        let payload = encode_keygen_payload(&wallet_id, t)
+            .map_err(|e| TssError::from(format!("failed to encode keygen request: {e}")))?;
 
         rt_service.keygen(t, n, payload, room_id, tx).await;
 
@@ -47,11 +47,12 @@ impl TssApiServer for Tss {
         let mut rt_service = self.rt_service.clone();
 
         let (tx, rx) = oneshot::channel();
-        let room_id = RoomId::from(room.clone());
-        println!("RPC sign: room name = '{room}', room_id = {room_id:?}");
-        println!("RPC sign: Make sure all nodes use the same room name! Expected: 'tss/0'");
+        let wallet_id = room;
+        let room_id = RoomId::from(DEFAULT_TRANSPORT_ROOM.to_owned());
+        let payload = encode_sign_payload(&wallet_id, msg)
+            .map_err(|e| TssError::from(format!("failed to encode sign request: {e}")))?;
 
-        rt_service.keysign(t + 1, room_id, msg, tx).await;
+        rt_service.keysign(t + 1, room_id, payload, tx).await;
 
         match rx.await {
             Ok(Ok(value)) => serde_ipld_dagcbor::from_slice(&value).map_err(|e| {

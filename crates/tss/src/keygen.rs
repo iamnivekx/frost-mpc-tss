@@ -1,4 +1,4 @@
-use crate::keysign::PublicKey;
+use crate::{decode_keygen_payload, keysign::PublicKey, wallet_key_share_path};
 use anyhow::{anyhow, Context};
 use frost_core::{
     keys::dkg::{part1, part2, part3, round1, round2},
@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{BufReader, Write},
-    path::Path,
+    io::Write,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -50,8 +49,8 @@ impl mpc_service::ComputeAgentAsync for KeyGen {
             .index_of(peerset.local_peer_id())
             .ok_or_else(|| anyhow!("local peer id not found in peerset"))?
             + 1;
-        let mut io = BufReader::new(&*payload);
-        let t = unsigned_varint::io::read_u16(&mut io)?;
+        let request = decode_keygen_payload(&payload)?;
+        let t = request.threshold;
         let curve = self.curve;
 
         let (signing_key_bytes, public_key_bytes, group_public_key_bytes, public_key_package_bytes) =
@@ -115,7 +114,7 @@ impl mpc_service::ComputeAgentAsync for KeyGen {
             max_signers: n,
         };
 
-        let group_pk_bytes = self.save_key_share(key_share_data)?;
+        let group_pk_bytes = self.save_key_share(&request.wallet_id, key_share_data)?;
         peerset.save_to_cache().await?;
 
         // Return PublicKey structure matching the expected format
@@ -337,8 +336,8 @@ impl KeyGen {
                 continue;
             }
 
-            let sender_id =
-                Identifier::try_from(req.from).map_err(|e| anyhow!("invalid sender identifier: {e}"))?;
+            let sender_id = Identifier::try_from(req.from)
+                .map_err(|e| anyhow!("invalid sender identifier: {e}"))?;
 
             // Skip if we already received a package from this sender
             if received_senders.contains(&sender_id) {
@@ -378,8 +377,9 @@ impl KeyGen {
         Ok((key_package, public_key_package))
     }
 
-    fn save_key_share(&self, key_share: KeyShare) -> anyhow::Result<Vec<u8>> {
-        let path = Path::new(self.path.as_str());
+    fn save_key_share(&self, wallet_id: &str, key_share: KeyShare) -> anyhow::Result<Vec<u8>> {
+        let wallet_path = wallet_key_share_path(self.path.as_str(), wallet_id);
+        let path = wallet_path.as_path();
         let dir = path.parent().context("failed to get parent directory")?;
         fs::create_dir_all(dir).context("failed to create directory")?;
 

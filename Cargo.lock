@@ -2660,6 +2660,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-otel-extra",
+ "uuid",
 ]
 
 [[package]]

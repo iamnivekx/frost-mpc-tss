@@ -38,6 +38,7 @@ serde_ipld_dagcbor = { workspace = true }
 
 # Cryptography
 sha3 = { workspace = true }
+uuid = { workspace = true }
 
 # Environment
 dotenvy = { workspace = true }

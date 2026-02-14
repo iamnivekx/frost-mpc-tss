@@ -1,4 +1,4 @@
-use crate::keygen::KeyShare;
+use crate::{decode_sign_payload, keygen::KeyShare, wallet_key_share_path};
 use anyhow::{anyhow, Context};
 use frost_core::{
     keys::{KeyPackage, PublicKeyPackage, SigningShare, VerifyingShare},
@@ -49,11 +49,13 @@ impl mpc_service::ComputeAgentAsync for KeySign {
             .iter()
             .map(|idx| (*idx + 1) as u16)
             .collect();
+        let request = decode_sign_payload(&payload)?;
+        let message = request.message;
 
         println!("Signing participants: {:?}", signing_participants);
         println!("Current identifier: {}", i);
 
-        let key_share = self.read_key_share()?;
+        let key_share = self.read_key_share(&request.wallet_id)?;
         println!("Key share identifier: {}", key_share.identifier);
 
         // Verify that current identifier matches key share identifier
@@ -72,7 +74,7 @@ impl mpc_service::ComputeAgentAsync for KeySign {
                     &key_share,
                     i,
                     &signing_participants,
-                    &payload,
+                    &message,
                     rt_incoming,
                     rt_outgoing,
                 )
@@ -83,7 +85,7 @@ impl mpc_service::ComputeAgentAsync for KeySign {
                     &key_share,
                     i,
                     &signing_participants,
-                    &payload,
+                    &message,
                     rt_incoming,
                     rt_outgoing,
                 )
@@ -458,8 +460,9 @@ impl KeySign {
         })
     }
 
-    fn read_key_share(&self) -> anyhow::Result<KeyShare> {
-        let share_bytes = fs::read(&self.path).context("failed to read local key")?;
+    fn read_key_share(&self, wallet_id: &str) -> anyhow::Result<KeyShare> {
+        let share_path = wallet_key_share_path(self.path.as_str(), wallet_id);
+        let share_bytes = fs::read(&share_path).context("failed to read local key")?;
         let key_share =
             serde_json::from_slice(&share_bytes).context("failed to deserialize local key")?;
         Ok(key_share)

@@ -41,6 +41,17 @@ struct NegotiationState {
     retry_count: u32,
     connection_wait_start: Option<std::time::Instant>,
     connection_wait_done: bool,
+    connected_peers_probe: Option<Pin<Box<dyn Future<Output = HashSet<PeerId>> + Send>>>,
+    last_connected_peers_probe_at: Option<std::time::Instant>,
+}
+
+fn should_proceed_with_negotiation(
+    n: u16,
+    elapsed: Duration,
+    connected_peers: usize,
+    wait_timeout: Duration,
+) -> bool {
+    connected_peers + 1 >= n as usize || elapsed >= wait_timeout
 }
 
 impl NegotiationChannel {
@@ -56,7 +67,7 @@ impl NegotiationChannel {
         let local_peer_id = network_service.local_peer_id();
         Self {
             rx: Some(room_rx),
-            timeout: Box::pin(tokio::time::sleep(Duration::from_secs(15))),
+            timeout: Box::pin(tokio::time::sleep(Duration::from_secs(45))),
             agent: Some(agent),
             state: Some(NegotiationState {
                 id: room_id,
@@ -71,6 +82,8 @@ impl NegotiationChannel {
                 retry_count: 0,
                 connection_wait_start: None,
                 connection_wait_done: false,
+                connected_peers_probe: None,
+                last_connected_peers_probe_at: None,
             }),
         }
     }
@@ -93,6 +106,8 @@ impl Future for NegotiationChannel {
             mut retry_count,
             mut connection_wait_start,
             mut connection_wait_done,
+            mut connected_peers_probe,
+            mut last_connected_peers_probe_at,
         } = self.state.take().unwrap();
 
         loop {
@@ -181,48 +196,49 @@ impl Future for NegotiationChannel {
                     println!("Negotiation: Waiting for network connections to be established...");
                 }
 
-                // Check timeout - wait up to 30 seconds for connections
-                let wait_timeout = Duration::from_secs(10);
+                // Wait until peers are connected or timeout is reached.
+                let wait_timeout = Duration::from_secs(30);
                 if let Some(start) = connection_wait_start {
-                    if start.elapsed() >= wait_timeout {
-                        connection_wait_done = true;
-                        debug!("Negotiation: Connection wait timeout after {:?}, proceeding anyway (have {}/{} peers)", 
-                                 start.elapsed(), peers.len(), n);
-                    } else {
-                        // Actively check connected peers from network service
-                        // We need to poll the network service to get current connected peers
-                        // Since we can't await in poll, we'll use a future that checks this
-                        // For now, we'll check if we have enough known peers from discovery
-                        // The actual connection check happens when we try to send messages
+                    let probe_interval = Duration::from_millis(250);
 
-                        // Check if we have enough peers in the discovery set
-                        // The network service tracks connected peers, but we can't access it directly here
-                        // Instead, we'll proceed if we've waited at least 2 seconds (to allow initial connections)
-                        let min_wait = Duration::from_secs(2);
-                        if start.elapsed() < min_wait {
-                            // Not ready yet, wait a bit more
-                            let _ = self.state.insert(NegotiationState {
-                                id,
+                    if connected_peers_probe.is_none()
+                        && last_connected_peers_probe_at
+                            .map_or(true, |last_probe| last_probe.elapsed() >= probe_interval)
+                    {
+                        let service_clone = service.clone();
+                        connected_peers_probe =
+                            Some(async move { service_clone.get_connected_peers().await }.boxed());
+                        last_connected_peers_probe_at = Some(std::time::Instant::now());
+                    }
+
+                    if let Some(probe_fut) = connected_peers_probe.as_mut() {
+                        if let Poll::Ready(connected_peers) = Future::poll(probe_fut.as_mut(), cx) {
+                            let connected_count = connected_peers.len();
+                            let elapsed = start.elapsed();
+                            connection_wait_done = should_proceed_with_negotiation(
                                 n,
-                                request,
-                                network_service: service,
-                                peers,
-                                responses,
-                                pending_futures,
-                                pending_response,
-                                last_broadcast_time,
-                                retry_count,
-                                connection_wait_start,
-                                connection_wait_done,
-                            });
-                            cx.waker().wake_by_ref();
-                            return Poll::Pending;
-                        } else {
-                            // Minimum wait time passed, proceed to broadcast
-                            // The broadcast will try to connect if peers aren't connected yet
-                            connection_wait_done = true;
-                            println!("Negotiation: Minimum wait time passed, proceeding with broadcast (have {}/{} peers)", 
-                                     peers.len(), n);
+                                elapsed,
+                                connected_count,
+                                wait_timeout,
+                            );
+                            connected_peers_probe = None;
+
+                            if connection_wait_done {
+                                if elapsed >= wait_timeout && connected_count + 1 < n as usize {
+                                    debug!(
+                                        "Negotiation: Connection wait timeout after {:?}, proceeding anyway (connected {}/{})",
+                                        elapsed,
+                                        connected_count + 1,
+                                        n
+                                    );
+                                } else {
+                                    debug!(
+                                        "Negotiation: Network ready (connected {}/{}), proceeding with broadcast",
+                                        connected_count + 1,
+                                        n
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -240,6 +256,7 @@ impl Future for NegotiationChannel {
             };
 
             if should_broadcast {
+                let is_first_broadcast = last_broadcast_time.is_none();
                 println!(
                     "Negotiation: Starting negotiation for room {:?}, need {} peers (already have {})",
                     id,
@@ -264,6 +281,12 @@ impl Future for NegotiationChannel {
                 let _ = responses.insert(rx);
                 last_broadcast_time = Some(std::time::Instant::now());
                 retry_count += 1;
+                if is_first_broadcast {
+                    // Connection warmup can consume part of the initial timer.
+                    // Reset timeout on first outbound broadcast so negotiation retries
+                    // have a full timeout budget.
+                    self.timeout = Box::pin(tokio::time::sleep(Duration::from_secs(15)));
+                }
                 println!(
                     "Negotiation: Broadcast message sent (retry #{}), waiting for responses",
                     retry_count
@@ -300,6 +323,8 @@ impl Future for NegotiationChannel {
             retry_count,
             connection_wait_start,
             connection_wait_done,
+            connected_peers_probe,
+            last_connected_peers_probe_at,
         });
 
         // Wake this task to be polled again.
@@ -389,10 +414,11 @@ impl StartMsg {
 
 #[cfg(test)]
 mod tests {
-    use crate::negotiation::StartMsg;
+    use crate::negotiation::{should_proceed_with_negotiation, StartMsg};
     use crate::peerset::Peerset;
     use libp2p::PeerId;
     use std::str::FromStr;
+    use std::time::Duration;
 
     #[test]
     fn start_msg_encoding() {
@@ -428,5 +454,33 @@ mod tests {
         );
 
         assert_eq!(start_msg.peerset.parties, decoded.peerset.parties);
+    }
+
+    #[test]
+    fn negotiation_waits_until_connections_ready() {
+        assert!(
+            !should_proceed_with_negotiation(3, Duration::from_secs(3), 0, Duration::from_secs(10)),
+            "should keep waiting when connected peers are insufficient and timeout not reached"
+        );
+    }
+
+    #[test]
+    fn negotiation_proceeds_when_connections_ready() {
+        assert!(should_proceed_with_negotiation(
+            3,
+            Duration::from_secs(1),
+            2,
+            Duration::from_secs(10)
+        ));
+    }
+
+    #[test]
+    fn negotiation_proceeds_when_wait_timeout_reached() {
+        assert!(should_proceed_with_negotiation(
+            3,
+            Duration::from_secs(10),
+            0,
+            Duration::from_secs(10)
+        ));
     }
 }

@@ -34,3 +34,4 @@ blake2 = { workspace = true }
 
 # Utilities
 itertools = { workspace = true }
+uuid = { workspace = true }

@@ -9,10 +9,11 @@ use futures_util::FutureExt;
 use libp2p::PeerId;
 use mpc_network::{
     request_responses, request_responses::MessageContext, request_responses::MessageType,
-    NetworkService, RoomId,
+    request_responses::SessionId, NetworkService, RoomId,
 };
 use std::borrow::BorrowMut;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::pin::Pin;
@@ -30,6 +31,7 @@ pub(crate) struct NegotiationChannel {
 
 struct NegotiationState {
     id: RoomId,
+    session_id: SessionId,
     n: u16,
     request: Vec<u8>,
     network_service: NetworkService,
@@ -65,12 +67,14 @@ impl NegotiationChannel {
         pending_response: oneshot::Sender<anyhow::Result<Vec<u8>>>,
     ) -> Self {
         let local_peer_id = network_service.local_peer_id();
+        let session_id = uuid::Uuid::new_v4().into_bytes();
         Self {
             rx: Some(room_rx),
             timeout: Box::pin(tokio::time::sleep(Duration::from_secs(45))),
             agent: Some(agent),
             state: Some(NegotiationState {
                 id: room_id,
+                session_id,
                 n,
                 request,
                 network_service,
@@ -95,6 +99,7 @@ impl Future for NegotiationChannel {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let NegotiationState {
             id,
+            session_id,
             n,
             request,
             network_service: service,
@@ -142,6 +147,8 @@ impl Future for NegotiationChannel {
                                     MessageContext {
                                         message_type: MessageType::Coordination,
                                         protocol_id: agent.protocol_id(),
+                                        session_id,
+                                        message_id: 0,
                                     },
                                     start_msg.to_bytes().unwrap(),
                                     None,
@@ -162,6 +169,8 @@ impl Future for NegotiationChannel {
                             self.rx.take().unwrap(),
                             service.clone(),
                             peerset.clone(),
+                            session_id,
+                            VecDeque::new(),
                         );
                         return Poll::Ready(NegotiationMsg::Start {
                             agent,
@@ -171,6 +180,7 @@ impl Future for NegotiationChannel {
                             peerset,
                             peerset_rx,
                             request,
+                            session_id,
                         });
                     }
                 }
@@ -272,6 +282,8 @@ impl Future for NegotiationChannel {
                             MessageContext {
                                 message_type: MessageType::Coordination,
                                 protocol_id: agent.protocol_id(),
+                                session_id,
+                                message_id: 0,
                             },
                             vec![],
                             Some(tx),
@@ -312,6 +324,7 @@ impl Future for NegotiationChannel {
 
         let _ = self.state.insert(NegotiationState {
             id,
+            session_id,
             n,
             request,
             network_service: service,
@@ -342,6 +355,7 @@ pub(crate) enum NegotiationMsg {
         peerset: Peerset,
         peerset_rx: mpsc::Receiver<PeersetMsg>,
         request: Vec<u8>,
+        session_id: SessionId,
     },
     Abort {
         room_id: RoomId,

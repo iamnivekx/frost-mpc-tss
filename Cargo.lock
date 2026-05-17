@@ -2771,6 +2771,7 @@ dependencies = [
  "tokio",
  "tracing",
  "unsigned-varint 0.8.0",
+ "uuid",
 ]
 
 [[package]]

@@ -4,12 +4,14 @@ use frost_core::{
     keys::{KeyPackage, PublicKeyPackage, SigningShare, VerifyingShare},
     Ciphersuite, Identifier, SigningPackage,
 };
+use libp2p::PeerId;
 use mpc_network::Curve;
 use mpc_service::{IncomingRequest, OutgoingResponse, Peerset};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
+    str::FromStr,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -29,6 +31,85 @@ pub struct KeySign {
     path: String,
 }
 
+pub(crate) fn apply_key_share_participants(
+    parties: &mut Peerset,
+    key_share: &KeyShare,
+) -> anyhow::Result<u16> {
+    let (mapped_parties, local_identifier) =
+        key_share_parties_for_peers(parties.peers(), parties.local_peer_id(), key_share)?;
+    parties.parties = mapped_parties;
+
+    Ok(local_identifier)
+}
+
+pub(crate) fn key_share_parties_for_peers(
+    peers: Vec<PeerId>,
+    local_peer_id: &PeerId,
+    key_share: &KeyShare,
+) -> anyhow::Result<(Vec<usize>, u16)> {
+    if key_share.participants.is_empty() {
+        return Err(anyhow!("key share does not contain participant mapping"));
+    }
+
+    let mut identifiers = HashMap::new();
+    let mut used_identifiers = HashSet::new();
+    for participant in &key_share.participants {
+        let peer_id = PeerId::from_str(&participant.peer_id)
+            .map_err(|e| anyhow!("invalid participant peer id {}: {e}", participant.peer_id))?;
+        if participant.identifier == 0 {
+            return Err(anyhow!("participant identifier must be one-based"));
+        }
+        if participant.identifier > key_share.max_signers {
+            return Err(anyhow!(
+                "participant identifier {} exceeds max signers {}",
+                participant.identifier,
+                key_share.max_signers
+            ));
+        }
+        if !used_identifiers.insert(participant.identifier) {
+            return Err(anyhow!(
+                "duplicate participant identifier {}",
+                participant.identifier
+            ));
+        }
+        if identifiers
+            .insert(peer_id, participant.identifier)
+            .is_some()
+        {
+            return Err(anyhow!("duplicate participant peer id"));
+        }
+    }
+
+    let mut mapped_parties = Vec::with_capacity(peers.len());
+    for peer_id in peers {
+        let identifier = identifiers
+            .get(&peer_id)
+            .ok_or_else(|| anyhow!("peer {} is not in wallet key share", peer_id.to_base58()))?;
+        mapped_parties.push((*identifier - 1) as usize);
+    }
+
+    let local_identifier = *identifiers
+        .get(local_peer_id)
+        .ok_or_else(|| anyhow!("local peer is not in wallet key share"))?;
+
+    Ok((mapped_parties, local_identifier))
+}
+
+fn participant_identifier_for_session_index(
+    session_index: u16,
+    signing_participants: &[u16],
+) -> anyhow::Result<u16> {
+    let position = session_index
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("participant index must be one-based"))? as usize;
+    signing_participants.get(position).copied().ok_or_else(|| {
+        anyhow!(
+            "participant index {} is outside signing session",
+            session_index
+        )
+    })
+}
+
 #[async_trait::async_trait]
 impl mpc_service::ComputeAgentAsync for KeySign {
     fn protocol_id(&self) -> u64 {
@@ -42,20 +123,18 @@ impl mpc_service::ComputeAgentAsync for KeySign {
         rt_incoming: async_channel::Receiver<IncomingRequest>,
         rt_outgoing: async_channel::Sender<OutgoingResponse>,
     ) -> anyhow::Result<Vec<u8>> {
-        parties.recover_from_cache().await?;
-        let i = parties.index_of(parties.local_peer_id()).unwrap() + 1;
+        let request = decode_sign_payload(&payload)?;
+        let key_share = self.read_key_share(&request.wallet_id)?;
+        let i = apply_key_share_participants(&mut parties, &key_share)?;
         let signing_participants: Vec<u16> = parties
             .parties
             .iter()
             .map(|idx| (*idx + 1) as u16)
             .collect();
-        let request = decode_sign_payload(&payload)?;
         let message = request.message;
 
         println!("Signing participants: {:?}", signing_participants);
         println!("Current identifier: {}", i);
-
-        let key_share = self.read_key_share(&request.wallet_id)?;
         println!("Key share identifier: {}", key_share.identifier);
 
         // Verify that current identifier matches key share identifier
@@ -201,14 +280,16 @@ impl KeySign {
                 .await
                 .map_err(|e| anyhow!("error receiving message: {e}"))?;
 
-            let sender_id = Identifier::try_from(req.from)
-                .map_err(|e| anyhow!("invalid sender identifier {}: {e}", req.from))?;
+            let sender_identifier =
+                participant_identifier_for_session_index(req.from, signing_participants)?;
+            let sender_id = Identifier::try_from(sender_identifier)
+                .map_err(|e| anyhow!("invalid sender identifier {}: {e}", sender_identifier))?;
 
             // Verify sender is in the expected participants list
             if !expected_participants.contains(&sender_id) {
                 return Err(anyhow!(
                     "Received commitment from unexpected participant {} (expected: {:?})",
-                    req.from,
+                    sender_identifier,
                     signing_participants
                 ));
             }
@@ -223,18 +304,21 @@ impl KeySign {
                         .or_insert(sig_share);
                     println!(
                         "Round 1: Buffered early signature share from participant {}",
-                        req.from
+                        sender_identifier
                     );
                 } else {
                     println!(
                         "Round 1: Duplicate commitment from participant {}, skipping",
-                        req.from
+                        sender_identifier
                     );
                 }
                 continue;
             }
 
-            println!("Round 1: Received commitment from participant {}", req.from);
+            println!(
+                "Round 1: Received commitment from participant {}",
+                sender_identifier
+            );
             match SigningCommitments::<C>::deserialize(&payload) {
                 Ok(comms) => {
                     commitments_map.insert(sender_id, comms);
@@ -248,13 +332,13 @@ impl KeySign {
                             .or_insert(sig_share);
                         println!(
                             "Round 1: Buffered early signature share from participant {}",
-                            req.from
+                            sender_identifier
                         );
                         continue;
                     }
                     return Err(anyhow!(
                         "failed to deserialize commitments from participant {}: {}",
-                        req.from,
+                        sender_identifier,
                         commit_err
                     ));
                 }
@@ -330,14 +414,16 @@ impl KeySign {
                 .await
                 .map_err(|e| anyhow!("error receiving message: {e}"))?;
 
-            let sender_id = Identifier::try_from(req.from)
-                .map_err(|e| anyhow!("invalid sender identifier {}: {e}", req.from))?;
+            let sender_identifier =
+                participant_identifier_for_session_index(req.from, signing_participants)?;
+            let sender_id = Identifier::try_from(sender_identifier)
+                .map_err(|e| anyhow!("invalid sender identifier {}: {e}", sender_identifier))?;
 
             // Verify sender is in the expected participants list
             if !expected_participants.contains(&sender_id) {
                 return Err(anyhow!(
                     "Received signature share from unexpected participant {} (expected: {:?})",
-                    req.from,
+                    sender_identifier,
                     signing_participants
                 ));
             }
@@ -346,14 +432,14 @@ impl KeySign {
             if received_signature_participants.contains(&sender_id) {
                 println!(
                     "Round 2: Duplicate signature share from participant {}, skipping",
-                    req.from
+                    sender_identifier
                 );
                 continue;
             }
 
             println!(
                 "Round 2: Received signature share from participant {}",
-                req.from
+                sender_identifier
             );
             let payload: Vec<u8> = serde_ipld_dagcbor::from_slice(&req.payload)
                 .map_err(|e| anyhow!("failed to decode signature share: {e}"))?;
@@ -364,13 +450,13 @@ impl KeySign {
                     if SigningCommitments::<C>::deserialize(&payload).is_ok() {
                         println!(
                             "Round 2: Ignoring late commitment payload from participant {}",
-                            req.from
+                            sender_identifier
                         );
                         continue;
                     }
                     return Err(anyhow!(
                         "failed to deserialize signature share from participant {}: {e}",
-                        req.from
+                        sender_identifier
                     ));
                 }
             };
@@ -466,5 +552,174 @@ impl KeySign {
         let key_share =
             serde_json::from_slice(&share_bytes).context("failed to deserialize local key")?;
         Ok(key_share)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{key_share_parties_for_peers, participant_identifier_for_session_index};
+    use crate::keygen::{KeyShare, KeyShareParticipant};
+    use libp2p::PeerId;
+    use mpc_network::Curve;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    #[test]
+    fn sign_session_recovers_original_identifiers_from_key_share() {
+        let remote_peer = PeerId::random();
+        let skipped_peer = PeerId::random();
+        let local_peer = PeerId::random();
+        let key_share = KeyShare {
+            curve: Curve::Ed25519,
+            identifier: 3,
+            signing_key: vec![1],
+            public_key: vec![2],
+            group_public_key: vec![3],
+            public_key_package: vec![4],
+            min_signers: 2,
+            max_signers: 3,
+            participants: vec![
+                KeyShareParticipant {
+                    peer_id: remote_peer.to_base58(),
+                    identifier: 1,
+                },
+                KeyShareParticipant {
+                    peer_id: skipped_peer.to_base58(),
+                    identifier: 2,
+                },
+                KeyShareParticipant {
+                    peer_id: local_peer.to_base58(),
+                    identifier: 3,
+                },
+            ],
+        };
+
+        let (parties, local_identifier) =
+            key_share_parties_for_peers(vec![remote_peer, local_peer], &local_peer, &key_share)
+                .unwrap();
+
+        assert_eq!(local_identifier, 3);
+        assert_eq!(parties, vec![0, 2]);
+    }
+
+    #[test]
+    fn sign_session_rejects_duplicate_participant_identifiers() {
+        let remote_peer = PeerId::random();
+        let local_peer = PeerId::random();
+        let key_share = KeyShare {
+            curve: Curve::Ed25519,
+            identifier: 1,
+            signing_key: vec![1],
+            public_key: vec![2],
+            group_public_key: vec![3],
+            public_key_package: vec![4],
+            min_signers: 2,
+            max_signers: 2,
+            participants: vec![
+                KeyShareParticipant {
+                    peer_id: remote_peer.to_base58(),
+                    identifier: 1,
+                },
+                KeyShareParticipant {
+                    peer_id: local_peer.to_base58(),
+                    identifier: 1,
+                },
+            ],
+        };
+
+        let err =
+            key_share_parties_for_peers(vec![remote_peer, local_peer], &local_peer, &key_share)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("duplicate participant identifier"));
+    }
+
+    #[test]
+    fn sign_session_rejects_participant_identifier_outside_key_share_size() {
+        let remote_peer = PeerId::random();
+        let local_peer = PeerId::random();
+        let key_share = KeyShare {
+            curve: Curve::Ed25519,
+            identifier: 1,
+            signing_key: vec![1],
+            public_key: vec![2],
+            group_public_key: vec![3],
+            public_key_package: vec![4],
+            min_signers: 2,
+            max_signers: 2,
+            participants: vec![
+                KeyShareParticipant {
+                    peer_id: remote_peer.to_base58(),
+                    identifier: 1,
+                },
+                KeyShareParticipant {
+                    peer_id: local_peer.to_base58(),
+                    identifier: 3,
+                },
+            ],
+        };
+
+        let err =
+            key_share_parties_for_peers(vec![remote_peer, local_peer], &local_peer, &key_share)
+                .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("participant identifier 3 exceeds max signers 2"));
+    }
+
+    #[test]
+    fn session_index_maps_to_key_share_identifier_order() {
+        let signing_participants = vec![1, 3];
+
+        assert_eq!(
+            participant_identifier_for_session_index(1, &signing_participants).unwrap(),
+            1
+        );
+        assert_eq!(
+            participant_identifier_for_session_index(2, &signing_participants).unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark"]
+    fn benchmark_key_share_participant_mapping() {
+        let peers = (0..256).map(|_| PeerId::random()).collect::<Vec<_>>();
+        let local_peer = peers[128];
+        let key_share = KeyShare {
+            curve: Curve::Ed25519,
+            identifier: 129,
+            signing_key: vec![1],
+            public_key: vec![2],
+            group_public_key: vec![3],
+            public_key_package: vec![4],
+            min_signers: 128,
+            max_signers: 256,
+            participants: peers
+                .iter()
+                .enumerate()
+                .map(|(index, peer_id)| KeyShareParticipant {
+                    peer_id: peer_id.to_base58(),
+                    identifier: index as u16 + 1,
+                })
+                .collect(),
+        };
+
+        let iterations = 1_000;
+        let started = Instant::now();
+        for _ in 0..iterations {
+            let (parties, local_identifier) =
+                key_share_parties_for_peers(peers.clone(), &local_peer, &key_share).unwrap();
+            black_box((parties, local_identifier));
+        }
+        let elapsed = started.elapsed();
+        println!(
+            "mapped {} participants for {} iterations in {:?} ({:?}/iteration)",
+            peers.len(),
+            iterations,
+            elapsed,
+            elapsed / iterations
+        );
     }
 }

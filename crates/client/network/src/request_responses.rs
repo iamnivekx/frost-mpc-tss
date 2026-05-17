@@ -552,6 +552,8 @@ impl RequestResponsesBehaviour {
                 context: MessageContext {
                     message_type: MessageType::Computation,
                     protocol_id: 0,
+                    session_id: NO_SESSION_ID,
+                    message_id: 0,
                 },
                 payload: request,
                 is_broadcast: false,
@@ -1225,10 +1227,16 @@ pub struct WireMessage {
     pub is_broadcast: bool,
 }
 
+pub type SessionId = [u8; 16];
+
+pub const NO_SESSION_ID: SessionId = [0; 16];
+
 #[derive(Clone, Copy, Debug)]
 pub struct MessageContext {
     pub message_type: MessageType,
     pub protocol_id: u64,
+    pub session_id: SessionId,
+    pub message_id: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1279,6 +1287,13 @@ impl Codec for GenericCodec {
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
+        let mut session_id = NO_SESSION_ID;
+        io.read_exact(&mut session_id).await?;
+
+        let message_id = unsigned_varint::aio::read_u64(&mut io)
+            .await
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
         // Read the length.
         let length = unsigned_varint::aio::read_usize(&mut io)
             .await
@@ -1302,6 +1317,8 @@ impl Codec for GenericCodec {
             context: MessageContext {
                 message_type,
                 protocol_id,
+                session_id,
+                message_id,
             },
             payload: buffer,
             is_broadcast: is_broadcast != 0,
@@ -1377,6 +1394,19 @@ impl Codec for GenericCodec {
             let mut buffer = unsigned_varint::encode::u64_buffer();
             io.write_all(unsigned_varint::encode::u64(
                 req.context.protocol_id,
+                &mut buffer,
+            ))
+            .await?;
+        }
+
+        // Write session_id
+        io.write_all(&req.context.session_id).await?;
+
+        // Write message_id
+        {
+            let mut buffer = unsigned_varint::encode::u64_buffer();
+            io.write_all(unsigned_varint::encode::u64(
+                req.context.message_id,
                 &mut buffer,
             ))
             .await?;
@@ -1552,6 +1582,8 @@ mod tests {
                         let ctx = MessageContext {
                             message_type: MessageType::Computation,
                             protocol_id: 0,
+                            session_id: NO_SESSION_ID,
+                            message_id: 0,
                         };
                         swarm.behaviour_mut().send_request(
                             &peer_id,
@@ -1653,6 +1685,8 @@ mod tests {
                         let ctx = MessageContext {
                             message_type: MessageType::Computation,
                             protocol_id: 0,
+                            session_id: NO_SESSION_ID,
+                            message_id: 0,
                         };
                         swarm.behaviour_mut().send_request(
                             &peer_id,
@@ -1817,6 +1851,8 @@ mod tests {
                         let ctx = MessageContext {
                             message_type: MessageType::Computation,
                             protocol_id: 0,
+                            session_id: NO_SESSION_ID,
+                            message_id: 0,
                         };
                         swarm_1.behaviour_mut().send_request(
                             &peer_id,

@@ -4,6 +4,7 @@ use frost_core::{
     keys::dkg::{part1, part2, part3, round1, round2},
     Ciphersuite, Identifier,
 };
+use libp2p::PeerId;
 use mpc_network::Curve;
 use mpc_service::{IncomingRequest, OutgoingResponse, Peerset};
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,12 @@ use std::{
     fs,
     io::Write,
 };
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeyShareParticipant {
+    pub peer_id: String,
+    pub identifier: u16,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct KeyShare {
@@ -23,6 +30,8 @@ pub struct KeyShare {
     pub public_key_package: Vec<u8>, // Serialized PublicKeyPackage
     pub min_signers: u16,            // Store threshold from keygen
     pub max_signers: u16,            // Store total participants from keygen
+    #[serde(default)]
+    pub participants: Vec<KeyShareParticipant>,
 }
 
 pub struct KeyGen {
@@ -38,7 +47,7 @@ impl mpc_service::ComputeAgentAsync for KeyGen {
 
     async fn compute(
         mut self: Box<Self>,
-        mut peerset: Peerset,
+        peerset: Peerset,
         payload: Vec<u8>,
         incoming: async_channel::Receiver<IncomingRequest>,
         outgoing: async_channel::Sender<OutgoingResponse>,
@@ -112,10 +121,10 @@ impl mpc_service::ComputeAgentAsync for KeyGen {
             public_key_package: public_key_package_bytes,
             min_signers: t,
             max_signers: n,
+            participants: key_share_participants(&peerset),
         };
 
         let group_pk_bytes = self.save_key_share(&request.wallet_id, key_share_data)?;
-        peerset.save_to_cache().await?;
 
         // Return PublicKey structure matching the expected format
         let pk = PublicKey {
@@ -128,6 +137,21 @@ impl mpc_service::ComputeAgentAsync for KeyGen {
 
         Ok(pk_bytes)
     }
+}
+
+pub(crate) fn key_share_participants(peerset: &Peerset) -> Vec<KeyShareParticipant> {
+    key_share_participants_from_peers(peerset.peers())
+}
+
+pub(crate) fn key_share_participants_from_peers(peers: Vec<PeerId>) -> Vec<KeyShareParticipant> {
+    peers
+        .into_iter()
+        .enumerate()
+        .map(|(index, peer_id)| KeyShareParticipant {
+            peer_id: peer_id.to_base58(),
+            identifier: index as u16 + 1,
+        })
+        .collect()
 }
 
 impl KeyGen {
@@ -392,5 +416,55 @@ impl KeyGen {
             .context("failed to write local key to file")?;
 
         Ok(key_share.group_public_key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{key_share_participants_from_peers, KeyShare, KeyShareParticipant};
+    use libp2p::PeerId;
+    use mpc_network::Curve;
+
+    #[test]
+    fn key_share_json_carries_participant_mapping() {
+        let peers = vec![PeerId::random(), PeerId::random(), PeerId::random()];
+        let participants = key_share_participants_from_peers(peers.clone());
+
+        let key_share = KeyShare {
+            curve: Curve::Ed25519,
+            identifier: 1,
+            signing_key: vec![1],
+            public_key: vec![2],
+            group_public_key: vec![3],
+            public_key_package: vec![4],
+            min_signers: 2,
+            max_signers: 3,
+            participants: participants.clone(),
+        };
+
+        let encoded = serde_json::to_vec(&key_share).unwrap();
+        let decoded: KeyShare = serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded.participants, participants);
+        assert_eq!(decoded.participants.len(), 3);
+    }
+
+    #[test]
+    fn participant_mapping_uses_one_based_frost_identifiers() {
+        let peers = vec![PeerId::random(), PeerId::random(), PeerId::random()];
+
+        let participants = key_share_participants_from_peers(peers.clone());
+
+        assert_eq!(
+            participants,
+            peers
+                .into_iter()
+                .enumerate()
+                .map(|(index, peer_id)| KeyShareParticipant {
+                    peer_id: peer_id.to_base58(),
+                    identifier: index as u16 + 1,
+                })
+                .collect::<Vec<_>>()
+        );
     }
 }

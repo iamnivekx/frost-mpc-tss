@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 use tracing_otel_extra::Logger;
 
-use crate::commands::{keygen, node, setup, sign};
+use crate::commands::{benchmark, keygen, node, setup, sign};
 
 #[derive(Parser)]
 #[clap(version, about, propagate_version = true)]
@@ -23,6 +23,8 @@ impl Cli {
 /// See `sola --help` for more information.
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(name = "benchmark", about = "Run signing benchmark")]
+    Benchmark(benchmark::Command),
     #[command(name = "keygen", about = "Generate a threshold key")]
     Keygen(keygen::Command),
     #[command(name = "node", about = "Run MPC node")]
@@ -41,6 +43,7 @@ pub async fn run() -> anyhow::Result<()> {
         .expect("Failed to initialize logging");
 
     match opt.command {
+        Commands::Benchmark(command) => command.execute().await?,
         Commands::Keygen(command) => command.execute().await?,
         Commands::Node(command) => command.execute().await?,
         Commands::Setup(command) => command.execute().await?,
